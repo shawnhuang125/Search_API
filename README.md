@@ -89,7 +89,7 @@ DB_NAME=food_db
 ```
 python run.py
 ```
-伺服器將預設運行於 http://127.0.0.1:5003。
+伺服器將預設運行於 http://127.0.0.1:5003
 
 ## API Testing Guide (測試指南)
 - 本系統目前支援 Mock Mode (模擬模式)，即便沒有安裝真實資料庫也能進行測試。
