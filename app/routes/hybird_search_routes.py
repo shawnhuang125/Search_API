@@ -1,8 +1,8 @@
 from flask import Blueprint, request, jsonify
-from app.services.hybird_SQL_builder_service_v2 import HybridSQLBuilder
+from app.services.hybrid_SQL_builder_service_v2 import HybridSQLBuilder
 from app.repository.rdbms_repository import RdbmsRepository 
 from app.repository.vector_repository import VectorRepository
-from app.services.hybird_SQL_builder_service_v2 import enrich_results_with_photos
+from app.services.hybrid_SQL_builder_service_v2 import enrich_results_with_photos
 import logging
 
 place_search_bp = Blueprint("place_search_bp", __name__)
