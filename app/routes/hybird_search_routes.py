@@ -2,6 +2,7 @@ from flask import Blueprint, request, jsonify
 from app.services.hybird_SQL_builder_service_v2 import HybridSQLBuilder
 from app.repository.rdbms_repository import RdbmsRepository 
 from app.repository.vector_repository import VectorRepository
+from app.services.hybird_SQL_builder_service_v2 import enrich_results_with_photos
 import logging
 
 place_search_bp = Blueprint("place_search_bp", __name__)
@@ -16,12 +17,12 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
     logging.info(f"fetched data: {ai_to_api_data}")
 
     try:
-        # 2. 初始化服務 (全部開啟 use_mock=True 來測試流程)
+        # 初始化服務,開啟 use_mock=True 來測試流程
         builder = HybridSQLBuilder()
         vector_repo = VectorRepository(use_mock=True) # 使用模擬向量庫
         rdbms_repo = RdbmsRepository(use_mock=True)   # 使用模擬關聯式資料庫
 
-        # 分析意圖
+        # 針對輸入的json進行分析意圖
         plan = builder.analyze_intent(ai_to_api_data)
 
         vector_ids_for_sql = None 
@@ -44,6 +45,8 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
         # 3. 查詢 RDBMS (接入模擬資料的核心步驟)
         # 這會去呼叫 RdbmsRepository._execute_mock_db
         db_results = rdbms_repo.execute_dynamic_query(final_sql, query_params)
+
+        db_results = enrich_results_with_photos(db_results, plan)
 
         # 回傳完整結果
         response = {
