@@ -5,10 +5,17 @@ class HybridSQLBuilder:
         #  定義靜態的映射表 
         # 用於SELECT子句
         self.field_mapping = {
-            "id": "p.id", "name": "p.name", "address": "p.address", "rating": "p.rating",
-            "service_tags": "GROUP_CONCAT(tow.tag_content)",
-            "merchant_category": "GROUP_CONCAT(mc.name)" 
+            "id": "p.id", 
+            "name": "p.name", 
+            "address": "p.address", 
+            "rating": "p.rating",
+            "phone": "p.phone",       
+            "website": "p.website",
+            "opening_hours": "p.opening_hours",
+            "service_tags": "GROUP_CONCAT(DISTINCT tow.tag_content)",
+            "merchant_category": "GROUP_CONCAT(DISTINCT mc.name)" 
             # 用GROUP_CONCAT是因為一個地點可能會有很多的merchant_category/service_tags的值
+            # 用DISTINCT是因為要避免笛卡爾積的問題
             # 所以要合併成一個字串欄位回傳
         }
         # 用於where子句
@@ -16,7 +23,13 @@ class HybridSQLBuilder:
         # 這裡必須對應到原始資料表的欄位
         # sql的執行順序是 where -> gourpby -> select
         self.sql_where_mapping = {
-            "address": "p.address", "merchant_category": "mc.name", 
+            "id": "p.id",
+            "name": "p.name",         
+            "phone": "p.phone",       
+            "website": "p.website",   
+            "opening_hours": "p.opening_hours",
+            "address": "p.address", 
+            "merchant_category": "mc.name", 
             "service_tags": "tow.tag_content", "rating": "p.rating"
         }
         # 定義哪些欄位屬於語意搜尋或模糊比對的範疇
@@ -29,7 +42,7 @@ class HybridSQLBuilder:
     def analyze_intent(self, json_input):
         
         plan = {
-            "select_fields": ["p.id", "p.name", "p.address", "p.rating"], # 預設一定查店家的id,name,address,rating欄位
+            "select_fields": [], # 預設一定查店家的id,name,address,rating欄位
             "sort_clauses": [],      # 存放 ORDER BY 的字串
             "sql_where_logic": None, # 這裡只存邏輯樹結構，還不生成 SQL 字串
             "query_params": {},      # 預留給參數化查詢的字典  
@@ -37,20 +50,36 @@ class HybridSQLBuilder:
             "vector_keywords": [],    # 若需要，要查哪些關鍵字
             "photos_needed": False # 是否有photo需求
         }
+        # 取得意圖
+        intent = json_input.get("main_intent", "query")
+        # 如果意圖的值為"recommend""
+        if intent == "recommend":
+            # 推main_intent如果等於("recommand")無視info_needed,直接選擇所有欄位
+            for key, db_col in self.field_mapping.items():
+                plan["select_fields"].append(f"{db_col} AS {key}")
 
-        # 處理 Select子句的欄位,使用者要什麼樣的資訊,從info_needed來的資訊
-        # 會檢查 傳入的json裡面的info_needed key的value
-        # 然後把info_needed的值(字串)都加到plan的select_fields的list裡面
-        for info in json_input.get("info_needed", []):
-            # photo的處理,如果有photo需求的話,將photos_needed設為true
-            if info == "photos":
-                plan["photos_needed"] = True
-                continue
-            # 一般欄位處理
-            # 如果這個欄位在我們的 mapping 表中有定義，且還沒被加進去
-            if info in self.field_mapping and self.field_mapping[info] not in plan["select_fields"]:
-                # 轉換成 SQL 語法，例如 "p.name" 變成 "p.name AS name"
-                plan["select_fields"].append(f"{self.field_mapping[info]} AS {info}")
+            # 推薦模式強制開啟照片提供功能
+            plan["photos_needed"] = True
+        
+        else:
+            # query一般查詢模式
+            default_fields = ["id", "name", "address", "rating"]
+            for f in default_fields:
+                if f in self.field_mapping:
+                    plan["select_fields"].append(f"{self.field_mapping[f]} AS {f}")
+
+            # 加入使用者在 info_needed 指定的額外欄位
+            for info in json_input.get("info_needed",[]):
+                # 處理照片需求
+                if info == "photos":
+                    plan["photos_needed"] = True
+                
+                # 處理一般欄位
+                if info in self.field_mapping:
+                    col_sql = f"{self.field_mapping[info]} AS {info}"
+                    # 防止重複加入 (例如 name 已經在預設欄位裡了)
+                    if col_sql not in plan["select_fields"]:
+                        plan["select_fields"].append(col_sql)
 
         # 處理Sort排序規則
         for s in json_input.get("sort_conditions", []):
@@ -260,29 +289,3 @@ class HybridSQLBuilder:
         # # 未知欄位先忽略
         return None
     
-def enrich_results_with_photos(results, plan):
-    """
-    參數:
-      results: SQL 查回來的 List[Dict] 結果，例如 [{'id': 101, 'name': '店A'}, ...]
-      plan: analyze_intent 產出的計畫書
-    """
-    
-    # 只有當計畫書說「我需要照片」時才執行
-    if not plan.get("photos_needed"):
-        return results
-
-    base_url = "http://localhost/images/" # 圖片伺服器前綴
-
-    for row in results:
-        store_id = str(row['id'])
-        row['photos'] = [] # 初始化照片列表
-        
-        # 根據你的規則：店家ID + 01~10.jpg
-        for i in range(1, 11):
-            # zfill(2) 會把 1 變成 "01"
-            # 假設 ID 是 101，照片就是 10101.jpg, 10102.jpg...
-            photo_name = f"{store_id}{str(i).zfill(2)}.jpg"
-            full_url = base_url + photo_name
-            row['photos'].append(full_url)
-            
-    return results

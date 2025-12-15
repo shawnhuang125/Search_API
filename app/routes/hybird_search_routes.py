@@ -1,9 +1,9 @@
 from flask import Blueprint, request, jsonify
-from app.services.hybrid_SQL_builder_service_v2 import HybridSQLBuilder
 from app.repository.rdbms_repository import RdbmsRepository 
 from app.repository.vector_repository import VectorRepository
-from app.services.hybrid_SQL_builder_service_v2 import enrich_results_with_photos
+from app.services.hybrid_SQL_builder_service_v2 import HybridSQLBuilder
 import logging
+from app.utils.data_formatter import enrich_results_with_photos, parse_json_fields
 
 place_search_bp = Blueprint("place_search_bp", __name__)
 
@@ -20,7 +20,7 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
         # 初始化服務,開啟 use_mock=True 來測試流程
         builder = HybridSQLBuilder()
         vector_repo = VectorRepository(use_mock=True) # 使用模擬向量庫
-        rdbms_repo = RdbmsRepository(use_mock=True)   # 使用模擬關聯式資料庫
+        rdbms_repo = RdbmsRepository(use_mock=False)   # 使用模擬關聯式資料庫
 
         # 針對輸入的json進行分析意圖
         plan = builder.analyze_intent(ai_to_api_data)
@@ -42,16 +42,20 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
         # 生成 SQL
         final_sql, query_params = builder.build_sql(plan, vector_result_ids=vector_ids_for_sql)
 
-        # 3. 查詢 RDBMS (接入模擬資料的核心步驟)
+        # 查詢 RDBMS (接入模擬資料的核心步驟)
         # 這會去呼叫 RdbmsRepository._execute_mock_db
         db_results = rdbms_repo.execute_dynamic_query(final_sql, query_params)
+
+        # 處理opening_hours的反斜線問題,主要是因為pymysql會把它當成字串回傳所以空白處會多加反斜線
+        # 這裡要做的是如果有opening_hours回傳值把反斜線拿掉
+        db_results = parse_json_fields(db_results, fields_to_parse=['opening_hours'])
 
         db_results = enrich_results_with_photos(db_results, plan)
 
         # 回傳完整結果
         response = {
             "status": "success",
-            "mode": "dry_run_with_mock_data", # 標示為含模擬資料的試跑
+            "mode": "real_db_connection", # 標示為含模擬資料的試跑
             "data": {
                 # A. 向量搜尋的結果 (Metadata)
                 "vector_search_info": {

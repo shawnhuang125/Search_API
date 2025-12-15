@@ -17,6 +17,6 @@ def get_db_connection():
         cursorclass=pymysql.cursors.DictCursor, # 讓查詢結果變成字典型態 (key: value)
         
         # 進階資料庫連線設定
-        autocommit=False,  # 可以手動控制 commit
+        autocommit=True,  # 可以手動控制 commit
         charset="utf8mb4"  # 避免以後有人存 Emoji 你的資料庫會報錯
     )
