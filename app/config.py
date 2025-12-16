@@ -20,3 +20,8 @@ class Config:
     DATABASE_URL = (
         f"mysql+pymysql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
     )
+
+    IMAGES_URL = os.getenv("IMAGES_URL", "http://localhost/images/")
+
+    VECTOR_DB_HOST = os.environ.get('Vector_DB_HOST', 'localhost')
+    VECTOR_DB_PORT = int(os.environ.get('Vector_DB_PORT', 6333))

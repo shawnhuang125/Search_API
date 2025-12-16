@@ -5,3 +5,5 @@ pymysql
 cryptography
 requests
 mysql-connector-python
+qdrant-client
+sentence-transformers

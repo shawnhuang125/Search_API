@@ -3,7 +3,8 @@ from app.repository.rdbms_repository import RdbmsRepository
 from app.repository.vector_repository import VectorRepository
 from app.services.hybrid_SQL_builder_service_v2 import HybridSQLBuilder
 import logging
-from app.utils.data_formatter import enrich_results_with_photos, parse_json_fields
+from app.utils.data_formatter import parse_json_fields, format_distance_display
+from app.utils.get_photo import enrich_results_with_photos
 
 place_search_bp = Blueprint("place_search_bp", __name__)
 
@@ -47,9 +48,10 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
         db_results = rdbms_repo.execute_dynamic_query(final_sql, query_params)
 
         # 處理opening_hours的反斜線問題,主要是因為pymysql會把它當成字串回傳所以空白處會多加反斜線
-        # 這裡要做的是如果有opening_hours回傳值把反斜線拿掉
         db_results = parse_json_fields(db_results, fields_to_parse=['opening_hours'])
-
+        # 處理距離顯示 (m -> km)
+        db_results = format_distance_display(db_results)
+        # 補上照片連結(如果intent需要)
         db_results = enrich_results_with_photos(db_results, plan)
 
         # 回傳完整結果

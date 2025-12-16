@@ -1,14 +1,12 @@
-# main.py
+# run.py
 
 import logging
 import os
 from app import create_app
-from app.database_init import init_database
 from app.config import Config
 
-# ================================
-# Initialize Logging (English only)
-# ================================
+
+# Initialize Logging
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "app.log")
@@ -24,17 +22,12 @@ logging.basicConfig(
 
 logging.info("Logger initialized (run.py).")
 
-# ================================
-# Initialize Database
-# ================================
-#if init_database():
-#    logging.info(f"Database initialization completed. Host: {Config.DB_HOST}, Port:{Config.DB_PORT}")
-#else:
-#    logging.warning("Database initialization failed.")
 
-# ================================
+logging.info(f"Database: MySQL. Connection successfully! Host: {Config.DB_HOST}, Port:{Config.DB_PORT}, Database: {Config.DB_NAME}, User:{Config.DB_USER}")
+logging.info(f"Database: Qdrant. Connection successfully! Host: {Config.VECTOR_DB_HOST}, Port:{Config.VECTOR_DB_PORT}")
+logging.info(f"Connect to Photo Service Successfully. URL:{Config.IMAGES_URL}")
+# print(f"Database: MySQL. Connection successfully! Host: {Config.DB_HOST}, Port:{Config.DB_PORT}, Database: {Config.DB_NAME}, User:{Config.DB_USER}")
 # Start Flask App
-# ================================
 app = create_app()
 
 if __name__ == "__main__":
