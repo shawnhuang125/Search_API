@@ -1,58 +1,56 @@
-from typing import List, Dict, Any
+# 1. 引入 time 和 Tuple
+import time
+from typing import List, Dict, Any, Tuple 
 import logging
-import pymysql # 引入 pymysql 來處理錯誤 Exception
-from app.utils.db import get_db_connection # 引入工具函式
-
+import pymysql
+from app.utils.db import get_db_connection
 
 class RdbmsRepository:
     def __init__(self, use_mock: bool = True):
-        # 初始化 RDBMS Repository
-        logging.info("[RDBMS Repo] 初始化模式: REAL DB (將使用 utils.db 連線)")
+        logging.info("[RDBMS Repo] 初始化模式: REAL DB")
 
-    def execute_dynamic_query(self, sql: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        執行 SQL 查詢 (對外統一接口)
-        """
-        # 真實 DB 模式
+    # [修改點 1] 回傳型別提示改成 Tuple，代表會回傳 (資料列表, 秒數)
+    def execute_dynamic_query(self, sql: str, params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], float]:
         return self._execute_real_db(sql, params)
 
-
-    #  實作細節：真實資料庫邏輯
-    def _execute_real_db(self, sql: str, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _execute_real_db(self, sql: str, params: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], float]:
         connection = None
+        start_time = time.time()
+        
         try:
-            # 從 utils.db 取得連線
             connection = get_db_connection()
-
-            # 使用 context manager (with) 自動管理 Cursor 的開關
-            # 因為在 utils.db 設定 DictCursor，這裡不需要額外設定
             with connection.cursor() as cursor:
-                logging.info(f"[RDBMS Repo] 正在執行 SQL: {sql}")
-                logging.debug(f"[RDBMS Repo] 參數: {params}")
+                # [新增除錯點 1]
+                logging.info(f"[RDBMS Repo Debug] SQL 語句: {sql}")
+                logging.info(f"[RDBMS Repo Debug] 綁定參數內容與型別: " + 
+                             ", ".join([f"{k}: {v} ({type(v).__name__})" for k, v in params.items()]))
                 
-                # 執行查詢
                 cursor.execute(sql, params)
-                
-                # 獲取結果 (List of Dicts)
                 records = cursor.fetchall()
                 
-                logging.info(f"[RDBMS Repo] 查詢成功，取得 {len(records)} 筆資料")
-                return list(records)
+                end_time = time.time()
+                execution_time = end_time - start_time
                 
-        except pymysql.MySQLError as e:
-            # 捕捉 pymysql 特有的錯誤
-            logging.error(f"[RDBMS Repo] 資料庫錯誤: {e}")
-            return []
-        
-        except Exception as e:
-            # 捕捉其他未預期的錯誤
-            logging.error(f"[RDBMS Repo] 系統錯誤: {e}")
-            return []
+                # [新增除錯點 2]
+                if records:
+                    sample = records[0]
+                    logging.info(f"[RDBMS Repo Debug] 取得第一筆原始資料範例: {sample}")
+                    if 'facility_tags' in sample:
+                        logging.info(f"[RDBMS Repo Debug] 原始 facility_tags 內容: {sample['facility_tags']}")
+                        logging.info(f"[RDBMS Repo Debug] 原始 facility_tags 型別: {type(sample['facility_tags'])}")
+                else:
+                    logging.warning("[RDBMS Repo Debug] 查詢結果為空，請檢查 SQL 條件或資料庫編碼")
+                
+                logging.info(f"[RDBMS Repo] 查詢成功，取得 {len(records)} 筆資料，耗時: {execution_time:.5f}秒")
+                return list(records), execution_time
 
+        # --- 必須補上這部分，否則會出現截圖中的 Pylance 錯誤 ---
+        except pymysql.MySQLError as e:
+            logging.error(f"[RDBMS Repo] 資料庫錯誤: {e}")
+            return [], 0.0
+        except Exception as e:
+            logging.error(f"[RDBMS Repo] 系統錯誤: {e}")
+            return [], 0.0
         finally:
-            # 務必手動關閉連線 (Connection)，因為 pymysql 的 connection 不會自動用 with 關閉
             if connection:
                 connection.close()
-                logging.debug("[RDBMS Repo] 資料庫連線已釋放")
-
-    

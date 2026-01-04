@@ -15,7 +15,7 @@ class VectorRepository:
     def __init__(self, host: str = "localhost", port: int = 6333, use_mock: bool = False):
         self.use_mock = use_mock or (not HAS_VECTOR_LIB)
         self.collection_name = "restaurants"
-
+        self.payload_ready = False # 你的情況：目前資料庫還沒塞 Payload，設為 False
         # ▼▼▼ 修改 1: 明確宣告型別為 Any，避免 Pylance 報錯說它是 None ▼▼▼
         self.client: Any = None
         self.model: Any = None
@@ -29,23 +29,30 @@ class VectorRepository:
             logging.info(f"[Repo] 初始化模式: REAL QDRANT (連線至 {target_host}:{target_port})")
             try:
                 self.client = QdrantClient(host=target_host, port=target_port)
-                logging.info("正在載入 Embedding 模型 (all-MiniLM-L6-v2)...")
-                self.model = SentenceTransformer('all-MiniLM-L6-v2')
+                logging.info("正在載入 Embedding 模型 (intfloat/multilingual-e5-small)...")
+                self.model = SentenceTransformer('intfloat/multilingual-e5-small')
                 logging.info("模型載入完成")
             except Exception as e:
                 logging.error(f"[Repo] 初始化失敗，將降級為 Mock 模式: {e}")
                 self.use_mock = True
 
-    def search_by_vector(self, keywords: str) -> List[VectorSearchResult]:
+    def search_by_vector(self, keywords: str) -> List[VectorSearchResult] | None:
+        
         logging.info(f"[Repo] 執行向量搜尋, 關鍵字: {keywords}")
+
+        if not self.payload_ready:
+            logging.warning("[Repo] Payload 尚未就緒，回傳 None 以跳過 SQL ID 過濾")
+            return None
+        
         if not self.use_mock:
             return self._search_qdrant_logic(keywords)
+        
         return self._search_mock_logic(keywords)
 
     def _search_qdrant_logic(self, keywords: str) -> List[VectorSearchResult]:
         results = []
         
-        # ▼▼▼ 修改 2: 加入防呆檢查，告訴 Pylance 這裡絕對不會是 None ▼▼▼
+        # 修改 2: 加入防呆檢查，告訴 Pylance 這裡絕對不會是 None
         if self.client is None or self.model is None:
             logging.error("[Repo] Qdrant client 或 Model 未正確初始化")
             return []
@@ -86,6 +93,7 @@ class VectorRepository:
             return []
 
     def _search_mock_logic(self, keywords: str) -> List[VectorSearchResult]:
-        # ... (這部分維持原本的 Mock 邏輯不變) ...
-        # 為節省篇幅省略，請保留你原本的 Mock 程式碼
+        logging.info("[Repo] 觸發攔截邏輯：回傳功能未支援說明")
+        
+        # 回傳一筆特殊的 Mock 資料告知狀態
         return []

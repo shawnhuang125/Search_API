@@ -14,13 +14,12 @@ class HybridSQLBuilder:
             "phone": "p.phone",       
             "website": "p.website",
             "opening_hours": "p.opening_hours",
-            "service_tags": "GROUP_CONCAT(DISTINCT tow.tag_content)",
-            "merchant_category": "GROUP_CONCAT(DISTINCT mc.name)",
-            # 用GROUP_CONCAT是因為一個地點可能會有很多的merchant_category/service_tags的值
-            # 用DISTINCT是因為要避免笛卡爾積的問題
-            # 所以要合併成一個字串欄位回傳
-            "lat":"p.lat",
-            "lng":"p.lng"
+            "food_type": "pa.food_type",
+            "cuisine_type": "pa.cuisine_type",
+            "merchant_categories": "pa.merchant_categories",
+            "facility_tags": "pa.facility_tags",
+            "lat": "p.lat",
+            "lng": "p.lng"
         }
         # 用於where子句
         # 如何篩選資料
@@ -31,14 +30,20 @@ class HybridSQLBuilder:
             "name": "p.name",         
             "phone": "p.phone",       
             "website": "p.website",   
+            "food_type": "pa.food_type",
             "opening_hours": "p.opening_hours",
             "address": "p.address", 
-            "merchant_category": "mc.name", 
-            "service_tags": "tow.tag_content", "rating": "p.rating"
+            "merchant_categories": "pa.merchant_categories",
+            "rating": "p.rating"
         }
         # 定義哪些欄位屬於語意搜尋或模糊比對的範疇
         # 這裡的欄位是匯到向量資料庫去搜尋的欄位
-        self.vector_fields = {"cuisine_type", "flavor","food_type"}
+        self.vector_fields = { "flavor", "review_summary"}
+        self.facility_keys = {
+        "內用", "冷氣", "外帶", "吃到飽", "特約停車場", 
+        "行動支付", "現金支付", "信用卡" 
+        }
+        self.json_field_source = "pa.facility_tags"
 
     # 只負責看懂 JSON，告訴你需不需要跑向量搜尋
     # 解析意圖
@@ -103,6 +108,8 @@ class HybridSQLBuilder:
                     # 防止重複加入 (例如 name 已經在預設欄位裡了)
                     if col_sql not in plan["select_fields"]:
                         plan["select_fields"].append(col_sql)
+
+                
 
         # 處理Sort排序規則,包括distance排序問題
         for s in json_input.get("sort_conditions", []):
@@ -180,19 +187,25 @@ class HybridSQLBuilder:
         # 寫入向量搜尋結果
         # 如果plan裡面的vector_needed為true,需要向量搜尋
         if plan["vector_needed"]:
-            if vector_result_ids:
-                # 將 ID 列表轉成字串，例如 [1, 2, 3] -> "1,2,3"
-                ids_str = ",".join(str(int(x)) for x in vector_result_ids)
-                # 生成SQL過濾條件：只選出這些 ID 的店家
-                # 這些id是從向量資料庫搜尋完符合模糊搜索條件的店家id
-                # 這些店家id是要用來下一步到MySQL查詢店家資訊用的
-                final_where.append(f"p.id IN ({ids_str})")
-                logging.info(f"[SQL Builder] 注入向量搜尋結果 ID: {len(vector_result_ids)} 筆")
+            if vector_result_ids is not None: # 明確檢查是否有傳入列表 (包含空列表)
+                if len(vector_result_ids) > 0:
+                    # 將 ID 列表轉成字串，例如 [1, 2, 3] -> "1,2,3"
+                    
+                    ids_str = ",".join(str(int(x)) for x in vector_result_ids)
+                    # 生成SQL過濾條件：只選出這些 ID 的店家
+                    # 這些id是從向量資料庫搜尋完符合模糊搜索條件的店家id
+                    # 這些店家id是要用來下一步到MySQL查詢店家資訊用的
+                    final_where.append(f"p.id IN ({ids_str})")
+                    logging.info(f"[SQL Builder] 注入向量搜尋結果 ID: {len(vector_result_ids)} 筆")
+                else:
+                    # 需要向量搜尋但沒結果 -> 查無資料
+                    # 這時候SQL回傳空，所以加上 "1=0" (永遠為假)
+                    final_where.append("1=0")
+                    logging.warning("[SQL Builder] 向量搜尋無結果，強制 SQL 回傳空")
             else:
-                # 需要向量搜尋但沒結果 -> 查無資料
-                # 這時候SQL回傳空，所以加上 "1=0" (永遠為假)
-                final_where.append("1=0")
-                logging.warning("[SQL Builder] 需要向量搜尋但無結果回傳 (Target IDs is Empty)")
+                # 如果 vector_result_ids 是 None (代表跳過向量步驟)
+                # 就不加入任何關於 id IN (...) 的條件，讓 SQL 根據傳統欄位全量搜尋
+                logging.info("[SQL Builder] 向量搜尋被跳過或未就緒，不進行 ID 過濾")
 
         # 計算距離,注入SQL公式
         if plan["distance_needed"] and plan["user_location"]:
@@ -210,11 +223,9 @@ class HybridSQLBuilder:
         # 使用 LEFT JOIN 是為了避免因為沒有標籤或分類而導致店家被濾掉。
         # 目前是先寫死的,後續會再想想看有沒有更好的處理方式
         sql = "SELECT " + ", ".join(plan["select_fields"])
-        sql += """ FROM all_places p
-                   LEFT JOIN place_merchant_category pmc ON p.id = pmc.place_id
-                   LEFT JOIN merchant_category mc ON pmc.merchant_category_id = mc.category_id
-                   LEFT JOIN place_tags pt ON p.id = pt.place_id
-                   LEFT JOIN tags_overview tow ON pt.tag_id = tow.tag_id """
+        # 修正：在 FROM 與 JOIN 關鍵字前後加入明確的空格
+        sql += " FROM all_places p "
+        sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
         
         # 如果有 WHERE 條件，把它們用 AND 串起來
         if final_where:
@@ -223,7 +234,7 @@ class HybridSQLBuilder:
         # 加上 GROUP BY p.id
         # 因為用了 JOIN (一對多) 和 GROUP_CONCAT (聚合),
         # 必須依據店家 ID 分組，才能將多個標籤縮成一行
-        sql += " GROUP BY p.id"
+        sql += " GROUP BY p.id "
 
         # 加上排序
         # 還未處理如果有距離排序需求的情況!
@@ -238,98 +249,84 @@ class HybridSQLBuilder:
 
     # 將巢狀JSON邏輯樹轉平為SQL WHERE字串
     def _recursive_parse(self, node):
-        # 如果是當前節點是空的就回傳none
-        if not node: return None
+        if not node: 
+            logging.debug("[SQL Builder Debug] 節點為空，跳過解析")
+            return None
 
-        # 處理conditions底下的條件列表,每個條件都算是child
+        # 1. 處理邏輯運算子節點 (AND/OR)
         if "op" in node and "conditions" in node:
             operator = node["op"].upper()
-            # 用來放條件句的地方
-            # 假設JSON邏輯樹:
-            # {
-                #"op": "OR",
-                #"conditions": [
-                    #{ "address": { "value": "台北", "cmp": "=" } },  // 子條件 1
-                    #{ "rating":  { "value": 4, "cmp": ">" } }        // 子條件 2
-                #]
-            #}
-            # 當 _recursive_parse 跑到這個節點時，迴圈會跑兩次：
-            # 第 1 次迴圈 (處理 address): 呼叫 _recursive_parse(子條件1)
-            # 函式回傳字串： "p.address = %(p0)s"
-            # 程式把它放進籃子：child_sqls = ["p.address = %(p0)s"]
-            # 第 2 次迴圈 (處理 rating)
-            # 呼叫 _recursive_parse(子條件2)
-            # 函式回傳字串： "p.rating > %(p1)s"
-            # 程式把它追加進籃子：child_sqls = ["p.address = %(p0)s", "p.rating > %(p1)s"]
-            # 迴圈結束後 (組裝)： 現在籃子裡有兩個零件了。程式會看你的 op 是 "OR"，所以執行 .join()：
-            # separator = " OR "
-            # result = separator.join(child_sqls)
-            # 結果變成字串： "p.address = %(p0)s OR p.rating > %(p1)s"
+            logging.debug(f"[SQL Builder Debug] 解析群組節點: {operator}, 子條件數: {len(node['conditions'])}")
             child_sqls = []
-            # 遞迴處理每一個子條件
-            for child in node["conditions"]:
+            for i, child in enumerate(node["conditions"]):
                 child_sql = self._recursive_parse(child)
-                # 如果有子條件回傳None代表它是向量欄位,這裡會自動過濾掉
-                # child_sqls的另外一個功能是過濾掉向量條件
-                # 假設JSON變成這樣(SQL 條件 + 向量條件)
-                #{
-                    #"op": "AND",
-                    #"conditions": [
-                        #{ "address": { "value": "台北", ... } },   // SQL 欄位
-                        #{ "flavor":  { "value": "辣", ... } }      // 向量欄位 (應該被 SQL 忽略)
-                    #]
-                #}
-                # 執行過程
-                # 處理address:回傳 "p.address = '台北'"放入child_sqls
-                # 處理flavor
-                # 因為flavor 是向量欄位，_recursive_parse 會回傳 None
-                # 程式碼有一行if child_sql: (如果是 None 就不要加進去)
-                # 結果:flavor 被丟掉了,沒進籃子
-                # 最終child_sqls的內容
-                # child_sqls=["p.address = '台北'"]
-                # 因為len(child_sqls) == 1,程式會直接回傳這個字串,而不加 AND 也不加括號
                 if child_sql:
                     child_sqls.append(child_sql)
-            # 如果過濾後沒有任何有效SQL條件,例如全部是向量條件,回傳 None
-            if not child_sqls: return None
-
-
-            # 優化SQL結構：如果該層只有一個有效條件,不需要加括號()
-            # 例如：不需要寫 (rating > 4),直接寫rating > 4即可
-            # 情況 A (if len == 1)：直接回傳,不加括號
-            if len(child_sqls) == 1:
-                return child_sqls[0]
-
-            # 拼接 SQL：用運算子 (如 " AND ") 連接所有子條件
-            separator = f" {operator} "  
-            # 其他情況:因為有多個條件串接,為了保護邏輯,必須加括號。
-            return f"({separator.join(child_sqls)})"
-
+                else:
+                    logging.debug(f"[SQL Builder Debug] 群組 {operator} 的第 {i} 個子條件解析結果為空")
             
+            if not child_sqls: 
+                logging.debug(f"[SQL Builder Debug] 群組 {operator} 無任何有效子條件")
+                return None
+                
+            if len(child_sqls) == 1: 
+                return child_sqls[0]
+            
+            separator = f" {operator} "  
+            combined_sql = f"({separator.join(child_sqls)})"
+            logging.debug(f"[SQL Builder Debug] 組合群組 SQL: {combined_sql}")
+            return combined_sql
 
-
-        # 處理單一條件(葉節點)
+        # 2. 處理單一條件 (葉節點)
+        # 取得當前條件的 Key (例如: "外帶" 或 "food_type")
         key = list(node.keys())[0]
+        node_data = node[key]
+        val = node_data.get("value")
+        cmp = node_data.get("cmp", "=").upper()
         
-        # 如果是 SQL 欄位 -> 生成 SQL
-        if key in self.sql_where_mapping:
-            db_col = self.sql_where_mapping[key] # 取得真實 DB 欄位名 (如 p.address)
-            val = node[key]["value"] # 取得值
-            cmp = node[key]["cmp"]   # 取得比較運算子(如 =, >, LIKE)
-            # 參數化查詢處理 (Parameterized Query)
-            # 生成參數代號，例如 p0, p1
-            p_name = f"p{self.param_counter}"
-            # 將真實值存入字典，而不是直接拼接到SQL字串中(防止 SQL Injection)
-            self.query_params[p_name] = val
-            self.param_counter += 1
-            return f"{db_col} {cmp} %({p_name})s" # 回傳SQL片段，使用 %(name)s 佔位符
-        
-        # 如果是 向量欄位 (存在於 vector_fields)
-        # 在生成 SQL WHERE 字串時，直接忽略它！
-        # 因為這些條件已經在 build_sql 的外層透過 `p.id IN (...)` 處理掉了
-        # 這裡回傳 None，會被上面的分支 A 過濾掉。
-        elif key in self.vector_fields:
+        # --- [核心追蹤] ---
+        logging.info(f"===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp} | 原始值: {val}")
+
+        # 優先檢查向量欄位
+        if key in self.vector_fields:
+            logging.info(f"[SQL Builder Debug] '{key}' 判定為向量欄位，排除於 SQL 之外")
             return None
-        # # 未知欄位先忽略
+
+        # --- 處理 JSON 設施標籤 ---
+        if key in self.facility_keys:
+            if val is not True: 
+                logging.info(f"[SQL Builder Debug] 設施標籤 '{key}' 值為 {val} (非 True)，略過此條件")
+                return None
+            
+            p_name = f"p{self.param_counter}"
+            # 寬鬆匹配邏輯：%"外帶"%true%
+            param_value = f'%"{key}"%true%' 
+            self.query_params[p_name] = param_value
+            self.param_counter += 1
+            
+            sql_fragment = f"{self.json_field_source} LIKE %({p_name})s"
+            logging.debug(f"[SQL Builder Debug] 生成標籤 SQL: {sql_fragment} | 參數 {p_name}: {param_value}")
+            return sql_fragment
+        
+        # --- 處理一般 SQL 欄位 ---
+        if key in self.sql_where_mapping:
+            db_col = self.sql_where_mapping[key]
+            p_name = f"p{self.param_counter}"
+            
+            if key == "food_type" or cmp == "LIKE":
+                param_value = f"%{val}%"
+                self.query_params[p_name] = param_value
+                self.param_counter += 1
+                sql_fragment = f"{db_col} LIKE %({p_name})s"
+            else:
+                param_value = val
+                self.query_params[p_name] = param_value
+                self.param_counter += 1
+                sql_fragment = f"{db_col} {cmp} %({p_name})s"
+                
+            logging.debug(f"[SQL Builder Debug] 生成一般欄位 SQL: {sql_fragment} | 參數 {p_name}: {param_value}")
+            return sql_fragment
+        
+        # --- [警告] 欄位未定義 ---
+        logging.warning(f"!!! [SQL Builder Warning] 欄位 '{key}' 找不到對應的 Mapping 配置，該條件被丟棄")
         return None
-    

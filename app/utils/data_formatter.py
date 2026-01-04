@@ -29,29 +29,66 @@ def enrich_results_with_photos(results, plan):
             
     return results
 
+import json
+
+import json
+
 def parse_json_fields(results, fields_to_parse=None):
-    """
-    通用工具：將結果中的特定欄位從 JSON 字串轉為 Python 物件
-    :param results: 資料庫查詢結果 List[Dict]
-    :param fields_to_parse: 要解析的欄位名稱列表，預設為 ['opening_hours']
-    """
     if fields_to_parse is None:
-        fields_to_parse = ['opening_hours']
+        fields_to_parse = ['opening_hours', 'facility_tags']
 
     for row in results:
         for field in fields_to_parse:
-            # 檢查欄位是否存在且有值
-            if field in row and row[field]:
+            if field in row and isinstance(row[field], str):
                 val = row[field]
-                # 只有當它是「字串」時才需要解析
-                if isinstance(val, str):
-                    try:
-                        row[field] = json.loads(val)
-                    except Exception:
-                        pass
-    
+                # 移除可能影響解析的反斜線與首尾引號
+                cleaned_val = val.replace('\\', '')
+                if cleaned_val.startswith('"') and cleaned_val.endswith('"'):
+                    cleaned_val = cleaned_val[1:-1]
+                
+                try:
+                    # 關鍵：將字串轉為 dict
+                    row[field] = json.loads(cleaned_val)
+                except Exception:
+                    # 解析失敗時，給予 facility_tags 一個空字典以供後續函式處理
+                    row[field] = {} if field == 'facility_tags' else cleaned_val
     return results
 
+def format_response_data(results, plan):
+    """
+    根據 HybridSQLBuilder 產出的 plan，動態決定要執行的後處理步驟。
+    """
+    # 取得計畫中標記的需求
+    needed_fields = plan.get("select_fields", [])
+    photos_needed = plan.get("photos_needed", False)
+    distance_needed = plan.get("distance_needed", False)
+    
+    # 1. 解析 JSON 欄位 (根據 SQL 欄位別名判斷)
+    # 檢查 plan 中的 select_fields 字串清單，判斷是否有對應欄位
+    parse_targets = []
+    if any("AS opening_hours" in f for f in needed_fields):
+        parse_targets.append("opening_hours")
+    if any("AS facility_tags" in f for f in needed_fields):
+        parse_targets.append("facility_tags")
+        
+    if parse_targets:
+        results = parse_json_fields(results, fields_to_parse=parse_targets)
+    
+    # 2. 格式化設施標籤 (只有 SQL 有選該欄位時才執行)
+    if any("AS facility_tags" in f for f in needed_fields):
+        from app.utils.format_facility_tags import format_facility_tags
+        results = format_facility_tags(results)
+    
+    # 3. 處理距離顯示
+    if distance_needed:
+        results = format_distance_display(results)
+        
+    # 4. 補上照片 (依據 plan 決定)
+    if photos_needed:
+        from app.utils.get_photo import enrich_results_with_photos
+        results = enrich_results_with_photos(results, plan)
+        
+    return results
 
 def format_distance_display(results):
     """
@@ -80,3 +117,29 @@ def format_distance_display(results):
                 pass
                 
     return results
+
+
+def check_search_status(db_results, plan):
+    """
+    檢查搜尋結果狀態並回傳給 AI 參考的旗標
+    """
+    has_results = len(db_results) > 0
+    
+    # 判斷是否為「不完整的搜尋」
+    # 如果 plan 裡面有 vector_needed 但目前系統尚未支援，這就是不完整搜尋
+    is_incomplete = plan.get("vector_needed", False) 
+    
+    status_info = {
+        "no_results_found": not has_results,
+        "is_incomplete_search": is_incomplete,
+        "suggestion": ""
+    }
+    
+    # 根據結果給予 AI 建議
+    if not has_results:
+        if is_incomplete:
+            status_info["suggestion"] = "找不到符合精確條件的店家。由於語意搜尋尚未開啟，建議放寬標籤或名稱限制。"
+        else:
+            status_info["suggestion"] = "目前沒有符合所有條件的店家，建議修改關鍵字或過濾條件。"
+            
+    return status_info
