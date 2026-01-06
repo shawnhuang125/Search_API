@@ -30,7 +30,12 @@ async def generate_query_and_search(ai_to_api_data: dict = Body(...)): # 建議�
             # 3. 第一步：先執行 RDBMS 搜尋 (不帶向量 ID 限制)
             # 這樣不管 JSON 有什麼欄位，都會先過濾出基本的餐廳名單
             final_sql, query_params = builder.build_sql(plan, vector_result_ids=None)
+
+            # 開始RDB查詢程序
+            s_id = plan.get("s_id")
+            logging.info(f"[Search][SID: {s_id}] 執行 SQL 查詢中...")
             db_results, sql_duration = await rdbms_repo.execute_dynamic_query(final_sql, query_params)
+            logging.info(f"[Search][SID: {s_id}] 查詢完成，耗時: {sql_duration}s")
 
             # 3. [新增] 執行總數查詢
             count_sql, count_params = builder.build_count_sql(plan, vector_result_ids=None)
@@ -79,20 +84,21 @@ async def generate_query_and_search(ai_to_api_data: dict = Body(...)): # 建議�
             
             # 回傳完整結果
             response = {
-                "status": "success",
-                "mode": "real_db_connection",
+                "s_id": plan.get("s_id"),       # 用戶連線id
+                "status": "success",            # 查詢狀態success/failed
+                "mode": "real_db_connection",   # 連線類別
                 "data": {
-                    "search_status": search_status,
+                    "search_status": search_status, # 顯示包括分頁資訊與查詢結果參數
                     "diagnostics": diagnostics,   # 顯示詳細的錯誤訊息
                     "vector_search_info": vector_search_info,  # 說明本次搜尋不做向量搜尋
                     "generated_query": {
-                        "sql": final_sql,    
-                        "params": query_params
+                        "sql": final_sql,           # 該次查詢的SQL SCRIPTS
+                        "params": query_params      # 該次查詢的SQL Params查詢參數,為了防止SQL INJECTION
                     },
                     "performance": {
                         "sql_execution_time_sec": round(sql_duration, 4) # 取小數點後4位比較好看
                     },
-                    "final_results": db_results 
+                    "final_results": db_results         # 搜尋結果
                 }
             }
 

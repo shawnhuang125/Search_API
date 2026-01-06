@@ -77,8 +77,15 @@ class HybridSQLBuilder:
     # 回傳一個字典,包含SQL所需的結構以及向量搜尋的需求
     def analyze_intent(self, json_input):
         logging.info("[SQL Builder] 開始解析使用者意圖 (analyze_intent)")
+
+        s_id = json_input.get("s_id")
+        if not s_id:
+                    logging.error("[SQL Builder] 請求缺少 s_id，拒絕解析意圖")
+                    # 拋出異常，這會被外部的 try-except 捕捉並回傳給前端
+                    raise ValueError("Missing s_id: 多用戶環境下必須提供 Session ID 以進行追蹤")
         
         plan = {
+            "s_id": s_id,       # 用戶連線id
             "location_source": "none", # 新增：記錄來源 (user / default / none)
             "select_fields": [], # 預設一定查店家的id,name,address,rating欄位
             "sort_clauses": [],      # 存放 ORDER BY 的字串
@@ -92,6 +99,7 @@ class HybridSQLBuilder:
             "distance_needed": False,
             "user_location": None
         }
+
         # 獲取使用者的經緯度
         user_loc = json_input.get("user_location")
         # 如果有[info_needed] = 包含distance需求或sort_condition有距離排序
@@ -246,19 +254,7 @@ class HybridSQLBuilder:
         if where_sql:
             final_where.append(where_sql)
 
-        # 4. 處理向量搜尋 ID 過濾
-        if plan.get("vector_needed"):
-            if vector_result_ids is not None:
-                if len(vector_result_ids) > 0:
-                    ids_str = ",".join(str(int(x)) for x in vector_result_ids)
-                    final_where.append(f"p.id IN ({ids_str})")
-                    logging.info(f"[SQL Builder] 注入向量搜尋結果 ID: {len(vector_result_ids)} 筆")
-                else:
-                    # 向量搜尋應有結果卻無結果時，強制 SQL 查不到資料
-                    final_where.append("1=0")
-                    logging.warning("[SQL Builder] 向量搜尋無結果，強制 SQL 回傳空")
-
-        # 5. 計算距離公式注入
+        # 計算距離公式注入
         if plan.get("distance_needed") and plan.get("user_location"):
             u_lat = plan["user_location"]["lat"]
             u_lng = plan["user_location"]["lng"]
