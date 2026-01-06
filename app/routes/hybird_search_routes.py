@@ -30,6 +30,13 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
         # 這樣不管 JSON 有什麼欄位，都會先過濾出基本的餐廳名單
         final_sql, query_params = builder.build_sql(plan, vector_result_ids=None)
         db_results, sql_duration = rdbms_repo.execute_dynamic_query(final_sql, query_params)
+
+        # 3. [新增] 執行總數查詢
+        count_sql, count_params = builder.build_count_sql(plan, vector_result_ids=None)
+        count_results, _ = rdbms_repo.execute_dynamic_query(count_sql, count_params)
+        # 取得總數，若無結果則預設為 0
+        total_count = count_results[0]['total'] if count_results else 0
+
         #logging.info(f"[Debug] 原始 DB 回傳類型: {type(db_results)}, 內容: {db_results[:1]}")
         # --- 呼叫封裝好的格式化工具，將判斷邏輯移出 Route ---
         from app.utils.data_formatter import format_response_data
@@ -57,15 +64,25 @@ def generate_query_and_search(): # 建議改名，因為現在不只 generate qu
                 # vector_search_info["status"] = "success"
                 # vector_search_info["details"] = [vars(item) for item in raw_results]
                 pass
-
-        search_status = check_search_status(db_results, plan)
-
+        # 4. 取得搜尋狀態 (此處會包含強化後的診斷建議)
+        search_status = check_search_status(db_results, plan, total_count=total_count)
+        # --- 關鍵改動：建立 diagnostics 區塊 ---
+        diagnostics = None
+        if not db_results:
+            diagnostics = {
+                "active_filters": query_params,  # 顯示實際帶入 SQL 的參數 (如 p0, p1)
+                "reason": "目前過濾條件組合過於嚴苛，導致資料庫無相符結果",
+                "debug_logic_tree": plan.get("raw_logic_tree"), # 顯示原始邏輯樹以便比對
+                "sql_fragment": plan.get("generated_where_clause") # 建議在 builder 中存入此片段
+            }
+        
         # 回傳完整結果
         response = {
             "status": "success",
             "mode": "real_db_connection",
             "data": {
                 "search_status": search_status,
+                "diagnostics": diagnostics,   # 顯示詳細的錯誤訊息
                 "vector_search_info": vector_search_info,  # 說明本次搜尋不做向量搜尋
                 "generated_query": {
                     "sql": final_sql,    

@@ -118,28 +118,71 @@ def format_distance_display(results):
                 
     return results
 
-
-def check_search_status(db_results, plan):
-    """
-    檢查搜尋結果狀態並回傳給 AI 參考的旗標
-    """
+def check_search_status(db_results, plan, total_count=0):
     has_results = len(db_results) > 0
-    
-    # 判斷是否為「不完整的搜尋」
-    # 如果 plan 裡面有 vector_needed 但目前系統尚未支援，這就是不完整搜尋
     is_incomplete = plan.get("vector_needed", False) 
     
+    current_page = plan.get("page", 1)
+    page_size = plan.get("page_size", 3)
+    
     status_info = {
+        "total_count": total_count,
+        "current_page": current_page,
+        "page_size": page_size,
         "no_results_found": not has_results,
         "is_incomplete_search": is_incomplete,
-        "suggestion": ""
+        "has_next": (current_page * page_size) < total_count, 
+        "suggestion": "",
+        "debug_details": None  
     }
     
-    # 根據結果給予 AI 建議
+    # --- [建議補強] 查無資料時的診斷與建議邏輯 ---
     if not has_results:
+        active_params = plan.get("query_params", {})
+        
+        # 填充診斷資訊
+        status_info["debug_details"] = {
+            "applied_filters": active_params,
+            "sql_where_clause": plan.get("generated_where_clause"),
+            "vector_search_status": "Not Supported" if is_incomplete else "Not Triggered"
+        }
+
+        # 針對「結構化設施欄位」優化建議語
         if is_incomplete:
-            status_info["suggestion"] = "找不到符合精確條件的店家。由於語意搜尋尚未開啟，建議放寬標籤或名稱限制。"
+            status_info["suggestion"] = "目前關鍵字查無精確匹配，建議放寬條件。"
+        elif active_params:
+            # 關鍵修改：檢查參數值是否為 1 (代表有勾選如：冷氣、內用等設施)
+            has_facility_filter = any(v == 1 for v in active_params.values() if isinstance(v, int))
+            if has_facility_filter:
+                status_info["suggestion"] = "目前設施條件（如：冷氣、內用）組合較嚴苛，導致查無結果，建議減少勾選項目。"
+            else:
+                status_info["suggestion"] = "找不到符合關鍵字的店家，請嘗試修改食物種類或名稱。"
         else:
-            status_info["suggestion"] = "目前沒有符合所有條件的店家，建議修改關鍵字或過濾條件。"
+            status_info["suggestion"] = "目前查無資料，建議調整搜尋範圍。"
+            
+    return status_info
+    
+    if not has_results:
+        active_params = plan.get("query_params", {})
+        
+        status_info["debug_details"] = {
+            "applied_filters": active_params,
+            "sql_where_clause": plan.get("generated_where_clause"),
+            "vector_search_status": "Not Supported" if is_incomplete else "Not Triggered"
+        }
+
+        # 建議邏輯維持原樣，但因應結構化欄位微調
+        if is_incomplete:
+            status_info["suggestion"] = "找不到符合精確條件的店家。建議放寬標籤或名稱限制。"
+        elif active_params:
+            # 修改：現在設施標籤是 TINYINT(1) 數值 1，不再是帶引號的字串
+            # 檢查是否有任何參數的值是 1，代表有開啟設施過濾
+            has_facility = any(v == 1 for v in active_params.values() if isinstance(v, int))
+            if has_facility:
+                status_info["suggestion"] = "目前設施條件（如：冷氣、內用）組合過於嚴格，建議減少勾選項目。"
+            else:
+                status_info["suggestion"] = "目前關鍵字搜尋不到店家，請更換關鍵字。"
+        else:
+            status_info["suggestion"] = "查無資料，建議調整搜尋範圍。"
             
     return status_info

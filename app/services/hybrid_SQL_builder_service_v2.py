@@ -19,7 +19,15 @@ class HybridSQLBuilder:
             "merchant_categories": "pa.merchant_categories",
             "facility_tags": "pa.facility_tags",
             "lat": "p.lat",
-            "lng": "p.lng"
+            "lng": "p.lng",
+            "dine_in": "pa.has_dine_in",
+            "air_conditioner": "pa.has_air_conditioner",
+            "takeout": "pa.has_takeout",
+            "all_you_can_eat": "pa.is_all_you_can_eat",
+            "private_parking": "pa.has_private_parking",
+            "mobile_payment": "pa.accept_mobile_payment",
+            "cash_only": "pa.accept_cash_payment",
+            "credit_card": "pa.accept_credit_card"
         }
         # 用於where子句
         # 如何篩選資料
@@ -34,14 +42,22 @@ class HybridSQLBuilder:
             "opening_hours": "p.opening_hours",
             "address": "p.address", 
             "merchant_categories": "pa.merchant_categories",
-            "rating": "p.rating"
+            "rating": "p.rating",
+            "內用": "pa.has_dine_in",
+            "冷氣": "pa.has_air_conditioner",
+            "外帶": "pa.has_takeout",
+            "吃到飽": "pa.is_all_you_can_eat",
+            "特約停車場": "pa.has_private_parking",
+            "行動支付": "pa.accept_mobile_payment",
+            "現金支付": "pa.accept_cash_payment",
+            "信用卡": "pa.accept_credit_card"
         }
         # 定義哪些欄位屬於語意搜尋或模糊比對的範疇
         # 這裡的欄位是匯到向量資料庫去搜尋的欄位
         self.vector_fields = { "flavor", "review_summary"}
         self.facility_keys = {
-        "內用", "冷氣", "外帶", "吃到飽", "特約停車場", 
-        "行動支付", "現金支付", "信用卡" 
+            "內用", "冷氣", "外帶", "吃到飽", "特約停車場", 
+            "行動支付", "現金支付", "信用卡" 
         }
         self.json_field_source = "pa.facility_tags"
 
@@ -56,6 +72,8 @@ class HybridSQLBuilder:
             "sort_clauses": [],      # 存放 ORDER BY 的字串
             "sql_where_logic": None, # 這裡只存邏輯樹結構，還不生成 SQL 字串
             "query_params": {},      # 預留給參數化查詢的字典  
+            "page": json_input.get("page", 1),           # 新增：記錄當前頁碼
+            "page_size": json_input.get("page_size", 3), # 新增：記錄每頁顯示幾筆
             "vector_needed": False,  # 旗標：是否需要去查向量資料庫
             "vector_keywords": [],    # 若需要，要查哪些關鍵字
             "photos_needed": False, # 是否有photo需求
@@ -171,6 +189,10 @@ class HybridSQLBuilder:
     def build_sql(self, plan, vector_result_ids=None):
         logging.info("[SQL Builder] 開始建構 SQL (build_sql)")
         
+        page = plan.get("page", 1)   # 分頁變數
+        page_size = plan.get("page_size", 3)    # 分頁變數
+        offset = (page - 1) * page_size    # 分頁變數
+
         self.param_counter = 0  # 用於生成唯一的參數名稱(p0, p1, p2...)
         self.query_params = {} # 存放參數化查詢的實際值,防止 SQL注入攻擊
 
@@ -178,6 +200,13 @@ class HybridSQLBuilder:
         # 呼叫 _recursive_parse 把邏輯樹轉成字串(例如 "p.rating > 4.0")
         # 這裡一樣還沒有處理距離的處理邏輯!
         where_sql = self._recursive_parse(plan["raw_logic_tree"])
+
+        # --- 新增：將產生的 WHERE 條件存回 plan，供後續 check_search_status 使用 ---
+        plan["generated_where_clause"] = where_sql
+        # 也要把最終產生的 params 存回去
+        plan["query_params"] = self.query_params
+
+
         # 當 self._recursive_parse(...) 執行結束時，遞迴已經跑完了
         # 它吐出了一個巨大的、完整的字串，存進變數 where_sql 裡
         final_where = []
@@ -241,6 +270,9 @@ class HybridSQLBuilder:
         if plan["sort_clauses"]:
             sql += " ORDER BY " + ", ".join(plan["sort_clauses"])
 
+        sql += f" LIMIT {page_size} OFFSET {offset}"
+
+        logging.debug(f"[SQL Builder] 分頁資訊: 頁碼 {page}, 筆數 {page_size}, 偏移 {offset}")
         logging.debug(f"[SQL Builder] 生成 SQL:\n{sql}")
         logging.debug(f"[SQL Builder] 參數: {self.query_params}")
 
@@ -297,17 +329,18 @@ class HybridSQLBuilder:
             if val is not True: 
                 logging.info(f"[SQL Builder Debug] 設施標籤 '{key}' 值為 {val} (非 True)，略過此條件")
                 return None
-            
+            # 從 sql_where_mapping 取得對應的新欄位名 (如 pa.has_air_conditioner)
+            db_col = self.sql_where_mapping.get(key)
+            if not db_col: return None
             p_name = f"p{self.param_counter}"
-            # 寬鬆匹配邏輯：%"外帶"%true%
-            param_value = f'%"{key}"%true%' 
-            self.query_params[p_name] = param_value
+            # 數值改為 1 (TINYINT 1 代表 True)
+            self.query_params[p_name] = 1 
             self.param_counter += 1
-            
-            sql_fragment = f"{self.json_field_source} LIKE %({p_name})s"
-            logging.debug(f"[SQL Builder Debug] 生成標籤 SQL: {sql_fragment} | 參數 {p_name}: {param_value}")
+            # 生成精確比對 SQL: "pa.has_air_conditioner = 1"
+            sql_fragment = f"{db_col} = %({p_name})s"
+            logging.debug(f"[SQL Builder] 生成精確設施 SQL: {sql_fragment}")
             return sql_fragment
-        
+        # --- 恢復錯誤版本：使用 LIKE 匹配 JSON 字串 ---
         # --- 處理一般 SQL 欄位 ---
         if key in self.sql_where_mapping:
             db_col = self.sql_where_mapping[key]
@@ -330,3 +363,32 @@ class HybridSQLBuilder:
         # --- [警告] 欄位未定義 ---
         logging.warning(f"!!! [SQL Builder Warning] 欄位 '{key}' 找不到對應的 Mapping 配置，該條件被丟棄")
         return None
+    
+
+
+    def build_count_sql(self, plan, vector_result_ids=None):
+        """
+        生成用於計算總筆數的 SQL (不含 LIMIT 和 OFFSET)
+        """
+        # 邏輯與 build_sql 類似，但 SELECT 部分改為 COUNT
+        sql = "SELECT COUNT(DISTINCT p.id) AS total FROM all_places p "
+        sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
+        
+        final_where = []
+        # 這裡呼叫之前的遞迴解析，確保過濾條件一致
+        where_sql = self._recursive_parse(plan["raw_logic_tree"])
+        if where_sql:
+            final_where.append(where_sql)
+            
+        # 如果有向量 ID 限制也要加上去
+        if plan["vector_needed"] and vector_result_ids is not None:
+            if len(vector_result_ids) > 0:
+                ids_str = ",".join(str(int(x)) for x in vector_result_ids)
+                final_where.append(f"p.id IN ({ids_str})")
+            else:
+                final_where.append("1=0")
+
+        if final_where:
+            sql += " WHERE " + " AND ".join(final_where)
+            
+        return sql, self.query_params
