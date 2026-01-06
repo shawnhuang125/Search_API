@@ -1,7 +1,7 @@
 # app/utils/data_formatter.py
 import json
 from app.config import Config # 引入 Config 來讀取 base_url 
-
+# 
 def enrich_results_with_photos(results, plan):
     """
     參數:
@@ -29,10 +29,8 @@ def enrich_results_with_photos(results, plan):
             
     return results
 
-import json
 
-import json
-
+# 若['opening_hours', 'facility_tags']有反斜線就把反斜線拿掉,否則不做任何動作就回傳
 def parse_json_fields(results, fields_to_parse=None):
     if fields_to_parse is None:
         fields_to_parse = ['opening_hours', 'facility_tags']
@@ -54,6 +52,7 @@ def parse_json_fields(results, fields_to_parse=None):
                     row[field] = {} if field == 'facility_tags' else cleaned_val
     return results
 
+# 依照plan裡面去處理距離顯示與補上照片與格式化設施標籤 (只有 SQL 有選該欄位時才執行)
 def format_response_data(results, plan):
     """
     根據 HybridSQLBuilder 產出的 plan，動態決定要執行的後處理步驟。
@@ -63,7 +62,7 @@ def format_response_data(results, plan):
     photos_needed = plan.get("photos_needed", False)
     distance_needed = plan.get("distance_needed", False)
     
-    # 1. 解析 JSON 欄位 (根據 SQL 欄位別名判斷)
+    # 解析 JSON 欄位 (根據 SQL 欄位別名判斷)
     # 檢查 plan 中的 select_fields 字串清單，判斷是否有對應欄位
     parse_targets = []
     if any("AS opening_hours" in f for f in needed_fields):
@@ -74,22 +73,23 @@ def format_response_data(results, plan):
     if parse_targets:
         results = parse_json_fields(results, fields_to_parse=parse_targets)
     
-    # 2. 格式化設施標籤 (只有 SQL 有選該欄位時才執行)
+    # 格式化設施標籤 (只有 SQL 有選該欄位時才執行)
     if any("AS facility_tags" in f for f in needed_fields):
         from app.utils.format_facility_tags import format_facility_tags
         results = format_facility_tags(results)
     
-    # 3. 處理距離顯示
+    # 處理距離顯示
     if distance_needed:
         results = format_distance_display(results)
         
-    # 4. 補上照片 (依據 plan 決定)
+    # 補上照片 (依據 plan 決定)
     if photos_needed:
         from app.utils.get_photo import enrich_results_with_photos
         results = enrich_results_with_photos(results, plan)
         
     return results
 
+# 距離資料的格式化
 def format_distance_display(results):
     """
     將距離欄位 (公尺整數) 格式化為易讀字串
@@ -119,48 +119,44 @@ def format_distance_display(results):
     return results
 
 def check_search_status(db_results, plan, total_count=0):
+    """
+    檢查搜尋結果狀態，並整合分頁資訊與查無資料時的診斷建議。
+    """
     has_results = len(db_results) > 0
     is_incomplete = plan.get("vector_needed", False) 
     
+    # --- [新增] 提取分頁參數 ---
     current_page = plan.get("page", 1)
     page_size = plan.get("page_size", 3)
     
     status_info = {
-        "total_count": total_count,
-        "current_page": current_page,
-        "page_size": page_size,
-        "no_results_found": not has_results,
-        "is_incomplete_search": is_incomplete,
-        "has_next": (current_page * page_size) < total_count, 
-        "suggestion": "",
+        "location_info": None,    # 用戶經緯度的設定訊息
+        "total_count": total_count,     # 符合條件的總筆數
+        "current_page": current_page,   # 目前是第幾分頁
+        "page_size": page_size,         # 顯示幕前一頁共有幾筆店家數據
+        "no_results_found": not has_results,    # 沒有符合的店家資料就會設為true否則預設default
+        "is_incomplete_search": is_incomplete,  # 搜尋是否完整
+        "has_next": (current_page * page_size) < total_count,   # 目前累積顯示的筆數是否小於總筆數
+        "suggestion": "",       #如果沒有任何符合篩選條件的店家資料的情況下會顯示哪邊出問題
         "debug_details": None  
     }
-    
-    # --- [建議補強] 查無資料時的診斷與建議邏輯 ---
-    if not has_results:
-        active_params = plan.get("query_params", {})
-        
-        # 填充診斷資訊
-        status_info["debug_details"] = {
-            "applied_filters": active_params,
-            "sql_where_clause": plan.get("generated_where_clause"),
-            "vector_search_status": "Not Supported" if is_incomplete else "Not Triggered"
-        }
 
-        # 針對「結構化設施欄位」優化建議語
-        if is_incomplete:
-            status_info["suggestion"] = "目前關鍵字查無精確匹配，建議放寬條件。"
-        elif active_params:
-            # 關鍵修改：檢查參數值是否為 1 (代表有勾選如：冷氣、內用等設施)
-            has_facility_filter = any(v == 1 for v in active_params.values() if isinstance(v, int))
-            if has_facility_filter:
-                status_info["suggestion"] = "目前設施條件（如：冷氣、內用）組合較嚴苛，導致查無結果，建議減少勾選項目。"
-            else:
-                status_info["suggestion"] = "找不到符合關鍵字的店家，請嘗試修改食物種類或名稱。"
-        else:
-            status_info["suggestion"] = "目前查無資料，建議調整搜尋範圍。"
-            
-    return status_info
+    if plan.get("distance_needed"):
+        loc = plan.get("user_location")
+        source = plan.get("location_source")
+        
+        if source == "default":
+            status_info["location_info"] = {
+                "type": "default_fallback",
+                "message": f"未偵測到您的位置，目前以系統預設點 (崑山科大: {loc['lat']}, {loc['lng']}) 計算距離。",
+                "coordinates": loc
+            }
+        elif source == "user":
+            status_info["location_info"] = {
+                "type": "user_provided",
+                "message": "已根據您提供的位置計算距離。",
+                "coordinates": loc
+            }
     
     if not has_results:
         active_params = plan.get("query_params", {})

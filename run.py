@@ -2,11 +2,11 @@
 
 import logging
 import os
-from app import create_app
+import uvicorn
+from app.__init__ import app  # 確保你將 create_app 產出的 app 實例放在 app/main.py
 from app.config import Config
 
-
-# Initialize Logging
+# Initialize Logging (保持不變)
 log_dir = "logs"
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, "app.log")
@@ -20,16 +20,18 @@ logging.basicConfig(
     ]
 )
 
-logging.info("Logger initialized (run.py).")
+logging.info("Logger initialized (run.py - FastAPI mode).")
 
-
-logging.info(f"Database: MySQL. Connection successfully! Host: {Config.DB_HOST}, Port:{Config.DB_PORT}, Database: {Config.DB_NAME}, User:{Config.DB_USER}")
-logging.info(f"Database: Qdrant. Connection successfully! Host: {Config.VECTOR_DB_HOST}, Port:{Config.VECTOR_DB_PORT}")
+# 資料庫連線資訊 log (保持不變)
+logging.info(f"Database: MySQL. Host: {Config.DB_HOST}, Database: {Config.DB_NAME}")
+logging.info(f"Database: Qdrant. Host: {Config.VECTOR_DB_HOST}")
 logging.info(f"Connect to Photo Service Successfully. URL:{Config.IMAGES_URL}")
-# print(f"Database: MySQL. Connection successfully! Host: {Config.DB_HOST}, Port:{Config.DB_PORT}, Database: {Config.DB_NAME}, User:{Config.DB_USER}")
-# Start Flask App
-app = create_app()
 
 if __name__ == "__main__":
-    logging.info("Starting Flask server...")
-    app.run(host="0.0.0.0", port=5004, debug=True)
+    logging.info("Starting FastAPI server via Uvicorn...")
+    
+    # 使用 uvicorn 啟動，取代原本的 app.run
+    # host: 監聽地址
+    # port: 埠號 (你原本設定 5004)
+    # reload: 等同於 Flask 的 debug=True (僅建議開發環境使用)
+    uvicorn.run("run:app", host="0.0.0.0", port=5004, reload=False)

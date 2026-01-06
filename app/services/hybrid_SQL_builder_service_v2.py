@@ -6,28 +6,33 @@ class HybridSQLBuilder:
     def __init__(self):
         #  定義靜態的映射表 
         # 用於SELECT子句
+        # 輸出的JSON內容的鍵值也會照這個映射表生內容
         self.field_mapping = {
             "id": "p.id", 
-            "name": "p.name", 
+            "restaurant_name": "p.name", 
             "address": "p.address", 
             "rating": "p.rating",
             "phone": "p.phone",       
             "website": "p.website",
             "opening_hours": "p.opening_hours",
+            #"time": "p.opening_hours",             # 額外支援 time
             "food_type": "pa.food_type",
             "cuisine_type": "pa.cuisine_type",
+            #"cuisine": "pa.cuisine_type",          # 額外支援 cuisine
             "merchant_categories": "pa.merchant_categories",
+            #"restaurant_type": "pa.merchant_categories", # 依照要求：對應到類別
             "facility_tags": "pa.facility_tags",
+            #"service_tags": "pa.facility_tags",    # 依照要求：對應到標籤
             "lat": "p.lat",
             "lng": "p.lng",
-            "dine_in": "pa.has_dine_in",
-            "air_conditioner": "pa.has_air_conditioner",
-            "takeout": "pa.has_takeout",
-            "all_you_can_eat": "pa.is_all_you_can_eat",
-            "private_parking": "pa.has_private_parking",
-            "mobile_payment": "pa.accept_mobile_payment",
-            "cash_only": "pa.accept_cash_payment",
-            "credit_card": "pa.accept_credit_card"
+            #"dine_in": "pa.has_dine_in",
+            #"air_conditioner": "pa.has_air_conditioner",
+            #"takeout": "pa.has_takeout",
+            #"all_you_can_eat": "pa.is_all_you_can_eat",
+            #"private_parking": "pa.has_private_parking",
+            #"mobile_payment": "pa.accept_mobile_payment",
+            #"cash_only": "pa.accept_cash_payment",
+            #"credit_card": "pa.accept_credit_card"
         }
         # 用於where子句
         # 如何篩選資料
@@ -35,14 +40,20 @@ class HybridSQLBuilder:
         # sql的執行順序是 where -> gourpby -> select
         self.sql_where_mapping = {
             "id": "p.id",
-            "name": "p.name",         
+            "restaurant_name": "p.name",         
             "phone": "p.phone",       
             "website": "p.website",   
             "food_type": "pa.food_type",
             "opening_hours": "p.opening_hours",
+            "time": "p.opening_hours",             # 支援 logic_tree 傳入 time
             "address": "p.address", 
-            "merchant_categories": "pa.merchant_categories",
             "rating": "p.rating",
+            "merchant_categories": "pa.merchant_categories",
+            "restaurant_type": "pa.merchant_categories", # 依照要求：對應到類別
+            "cuisine": "pa.cuisine_type",          # 支援 logic_tree 傳入 cuisine
+            "service_tags": "pa.facility_tags",    # 支援 logic_tree 傳入 service_tags
+            
+            # --- 設施與標籤映射 (中文 Key 由 AI 產出) ---
             "內用": "pa.has_dine_in",
             "冷氣": "pa.has_air_conditioner",
             "外帶": "pa.has_takeout",
@@ -68,12 +79,13 @@ class HybridSQLBuilder:
         logging.info("[SQL Builder] 開始解析使用者意圖 (analyze_intent)")
         
         plan = {
+            "location_source": "none", # 新增：記錄來源 (user / default / none)
             "select_fields": [], # 預設一定查店家的id,name,address,rating欄位
             "sort_clauses": [],      # 存放 ORDER BY 的字串
             "sql_where_logic": None, # 這裡只存邏輯樹結構，還不生成 SQL 字串
             "query_params": {},      # 預留給參數化查詢的字典  
-            "page": json_input.get("page", 1),           # 新增：記錄當前頁碼
-            "page_size": json_input.get("page_size", 3), # 新增：記錄每頁顯示幾筆
+            "page": json_input.get("page", 1),           # 記錄當前頁碼
+            "page_size": json_input.get("page_size", 3), # 記錄每頁顯示幾筆
             "vector_needed": False,  # 旗標：是否需要去查向量資料庫
             "vector_keywords": [],    # 若需要，要查哪些關鍵字
             "photos_needed": False, # 是否有photo需求
@@ -82,11 +94,30 @@ class HybridSQLBuilder:
         }
         # 獲取使用者的經緯度
         user_loc = json_input.get("user_location")
-        # 如果有使用者的座標位置
+        # 如果有[info_needed] = 包含distance需求或sort_condition有距離排序
+        # 但沒有usder_location就先用預設的經緯度
+        wants_distance = (
+            "distance" in json_input.get("info_needed", []) or 
+            any(s.get("field") == "distance" for s in json_input.get("sort_conditions", []))
+        )
+        # 設定經位度訊息提供回傳檢查
         if user_loc and "lat" in user_loc and "lng" in user_loc:
+            plan["location_source"] = "user" # 使用者提供
             plan["distance_needed"] = True
             plan["user_location"] = user_loc
-            logging.debug(f"[SQL Builder] 偵測到使用者座標: {user_loc}，開啟距離計算功能")
+        elif wants_distance:
+            # 注入崑山科大座標
+            plan["location_source"] = "default" 
+            plan["distance_needed"] = True
+            plan["user_location"] = {"lat": 22.9972300, "lng": 120.2522700}
+            logging.warning(f"[SQL Builder] 使用預設座標 (崑山科大): {plan['user_location']}")
+        
+        # 如果沒傳座標但需要距離，則注入預設座標
+        if not user_loc or "lat" not in user_loc or "lng" not in user_loc:
+            if wants_distance:
+                # 暫時寫死台南火車站座標，方便開發測試
+                user_loc = {"lat": 22.9972300, "lng": 120.2522700}
+                logging.warning(f"[SQL Builder] 未偵測到座標但功能需要距離服務，注入預設座標: {user_loc}")
 
         # 取得意圖
         intent = json_input.get("main_intent", "query")
@@ -104,10 +135,15 @@ class HybridSQLBuilder:
         
         else:
             # query一般查詢模式
-            default_fields = ["id", "name", "address", "rating"]
-            for f in default_fields:
-                if f in self.field_mapping:
-                    plan["select_fields"].append(f"{self.field_mapping[f]} AS {f}")
+            base_fields = {
+                "id": "p.id",
+                "restaurant_name": "p.name", # 強制回傳名稱
+                "address": "p.address",
+                "rating": "p.rating"
+            }
+            
+            for key, db_col in base_fields.items():
+                plan["select_fields"].append(f"{db_col} AS {key}")
 
             # 加入使用者在 info_needed 指定的額外欄位
             for info in json_input.get("info_needed",[]):
@@ -189,94 +225,70 @@ class HybridSQLBuilder:
     def build_sql(self, plan, vector_result_ids=None):
         logging.info("[SQL Builder] 開始建構 SQL (build_sql)")
         
-        page = plan.get("page", 1)   # 分頁變數
-        page_size = plan.get("page_size", 3)    # 分頁變數
-        offset = (page - 1) * page_size    # 分頁變數
+        # 1. 初始化分頁變數
+        page = plan.get("page", 1)
+        page_size = plan.get("page_size", 3)
+        offset = (page - 1) * page_size
 
-        self.param_counter = 0  # 用於生成唯一的參數名稱(p0, p1, p2...)
-        self.query_params = {} # 存放參數化查詢的實際值,防止 SQL注入攻擊
+        # 2. 【關鍵】重置計數器與參數字典，確保每次生成 SQL 都是從 p0 開始
+        self.param_counter = 0 
+        self.query_params = {} 
 
-        # 遞迴生成 SQL 的 WHERE 子句(處理傳統欄位)
-        # 呼叫 _recursive_parse 把邏輯樹轉成字串(例如 "p.rating > 4.0")
-        # 這裡一樣還沒有處理距離的處理邏輯!
+        # 3. 遞迴生成 WHERE 子句
+        # 產生的參數會存入 self.query_params，計數器會增加
         where_sql = self._recursive_parse(plan["raw_logic_tree"])
 
-        # --- 新增：將產生的 WHERE 條件存回 plan，供後續 check_search_status 使用 ---
+        # 將產生的中間結果存回 plan 供除錯與 diagnostics 使用
         plan["generated_where_clause"] = where_sql
-        # 也要把最終產生的 params 存回去
         plan["query_params"] = self.query_params
 
-
-        # 當 self._recursive_parse(...) 執行結束時，遞迴已經跑完了
-        # 它吐出了一個巨大的、完整的字串，存進變數 where_sql 裡
         final_where = []
         if where_sql:
             final_where.append(where_sql)
 
-        # 寫入向量搜尋結果
-        # 如果plan裡面的vector_needed為true,需要向量搜尋
-        if plan["vector_needed"]:
-            if vector_result_ids is not None: # 明確檢查是否有傳入列表 (包含空列表)
+        # 4. 處理向量搜尋 ID 過濾
+        if plan.get("vector_needed"):
+            if vector_result_ids is not None:
                 if len(vector_result_ids) > 0:
-                    # 將 ID 列表轉成字串，例如 [1, 2, 3] -> "1,2,3"
-                    
                     ids_str = ",".join(str(int(x)) for x in vector_result_ids)
-                    # 生成SQL過濾條件：只選出這些 ID 的店家
-                    # 這些id是從向量資料庫搜尋完符合模糊搜索條件的店家id
-                    # 這些店家id是要用來下一步到MySQL查詢店家資訊用的
                     final_where.append(f"p.id IN ({ids_str})")
                     logging.info(f"[SQL Builder] 注入向量搜尋結果 ID: {len(vector_result_ids)} 筆")
                 else:
-                    # 需要向量搜尋但沒結果 -> 查無資料
-                    # 這時候SQL回傳空，所以加上 "1=0" (永遠為假)
+                    # 向量搜尋應有結果卻無結果時，強制 SQL 查不到資料
                     final_where.append("1=0")
                     logging.warning("[SQL Builder] 向量搜尋無結果，強制 SQL 回傳空")
-            else:
-                # 如果 vector_result_ids 是 None (代表跳過向量步驟)
-                # 就不加入任何關於 id IN (...) 的條件，讓 SQL 根據傳統欄位全量搜尋
-                logging.info("[SQL Builder] 向量搜尋被跳過或未就緒，不進行 ID 過濾")
 
-        # 計算距離,注入SQL公式
-        if plan["distance_needed"] and plan["user_location"]:
+        # 5. 計算距離公式注入
+        if plan.get("distance_needed") and plan.get("user_location"):
             u_lat = plan["user_location"]["lat"]
             u_lng = plan["user_location"]["lng"]
-            dist_sql = get_haversine_distance_sql(u_lat, u_lng) # 呼叫 utils 生成公式
-            plan["select_fields"].append(f"{dist_sql} AS distance") # 加入select 欄位
-            logging.debug("[SQL Builder] 已注入 Haversine 距離計算公式")
+            dist_sql = get_haversine_distance_sql(u_lat, u_lng)
+            
+            # 防止重複加入 distance 欄位
+            dist_alias = f"{dist_sql} AS distance"
+            if not any("AS distance" in f for f in plan["select_fields"]):
+                plan["select_fields"].append(dist_alias)
+                logging.debug("[SQL Builder] 已注入 Haversine 距離計算公式")
 
-        # 組裝 SQL
-        # 先組裝select子句
-        # all_places (主表)
-        # -> place_merchant_category (中間表) -> merchant_category (分類表)
-        # -> place_tags (中間表) -> tags_overview (標籤表)
-        # 使用 LEFT JOIN 是為了避免因為沒有標籤或分類而導致店家被濾掉。
-        # 目前是先寫死的,後續會再想想看有沒有更好的處理方式
+        # 6. 組裝最終 SQL
         sql = "SELECT " + ", ".join(plan["select_fields"])
-        # 修正：在 FROM 與 JOIN 關鍵字前後加入明確的空格
         sql += " FROM all_places p "
         sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
         
-        # 如果有 WHERE 條件，把它們用 AND 串起來
         if final_where:
             sql += " WHERE " + " AND ".join(final_where)
         
-        # 加上 GROUP BY p.id
-        # 因為用了 JOIN (一對多) 和 GROUP_CONCAT (聚合),
-        # 必須依據店家 ID 分組，才能將多個標籤縮成一行
+        # 必須依據 ID 分組以支援聚合欄位
         sql += " GROUP BY p.id "
 
-        # 加上排序
-        # 還未處理如果有距離排序需求的情況!
-        if plan["sort_clauses"]:
+        # 處理排序
+        if plan.get("sort_clauses"):
             sql += " ORDER BY " + ", ".join(plan["sort_clauses"])
 
+        # 加上 LIMIT 與 OFFSET 實現分頁
         sql += f" LIMIT {page_size} OFFSET {offset}"
 
-        logging.debug(f"[SQL Builder] 分頁資訊: 頁碼 {page}, 筆數 {page_size}, 偏移 {offset}")
         logging.debug(f"[SQL Builder] 生成 SQL:\n{sql}")
-        logging.debug(f"[SQL Builder] 參數: {self.query_params}")
-
-        # 回傳 SQL 字串與參數字典
         return sql, self.query_params
 
     # 將巢狀JSON邏輯樹轉平為SQL WHERE字串
@@ -340,13 +352,34 @@ class HybridSQLBuilder:
             sql_fragment = f"{db_col} = %({p_name})s"
             logging.debug(f"[SQL Builder] 生成精確設施 SQL: {sql_fragment}")
             return sql_fragment
-        # --- 恢復錯誤版本：使用 LIKE 匹配 JSON 字串 ---
+        
         # --- 處理一般 SQL 欄位 ---
         if key in self.sql_where_mapping:
             db_col = self.sql_where_mapping[key]
             p_name = f"p{self.param_counter}"
+            fields_to_force_like = ["food_type", "restaurant_type", "restaurant_name", "merchant_categories", "address"]
+
+            # 處理cmp = in / not in的情況
+            if cmp in ["in", "not in"]:
+                # 確保 val 是列表，若不是則轉為單一元素的列表
+                val_list = val if isinstance(val, list) else [val]
+                p_names = []
+                
+                for item in val_list:
+                    p_name = f"p{self.param_counter}"
+                    self.query_params[p_name] = item
+                    p_names.append(f"%({p_name})s")
+                    self.param_counter += 1
+                
+                # 組合成 (%(p0)s, %(p1)s, ...)
+                # 用於查詢用的查詢參數,防止SQL INJECTION
+                param_placeholders = ", ".join(p_names)
+                sql_fragment = f"{db_col} {cmp} ({param_placeholders})"
+                logging.debug(f"[SQL Builder Debug] 生成集合 SQL: {sql_fragment}")
+                return sql_fragment
             
-            if key == "food_type" or cmp == "LIKE":
+            # 處理cmp = LIKE的情況
+            if key in fields_to_force_like or cmp == "LIKE":
                 param_value = f"%{val}%"
                 self.query_params[p_name] = param_value
                 self.param_counter += 1
@@ -368,20 +401,23 @@ class HybridSQLBuilder:
 
     def build_count_sql(self, plan, vector_result_ids=None):
         """
-        生成用於計算總筆數的 SQL (不含 LIMIT 和 OFFSET)
+        生成用於計算總筆數的 SQL
         """
-        # 邏輯與 build_sql 類似，但 SELECT 部分改為 COUNT
+        # --- 必須新增這兩行，確保 Count 查詢從 p0 開始，且不殘留舊參數 ---
+        self.param_counter = 0 
+        self.query_params = {}
+
         sql = "SELECT COUNT(DISTINCT p.id) AS total FROM all_places p "
         sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
         
         final_where = []
-        # 這裡呼叫之前的遞迴解析，確保過濾條件一致
+        # 重新呼叫遞迴解析，這會生成全新的、乾淨的 p0, p1...
         where_sql = self._recursive_parse(plan["raw_logic_tree"])
         if where_sql:
             final_where.append(where_sql)
             
-        # 如果有向量 ID 限制也要加上去
-        if plan["vector_needed"] and vector_result_ids is not None:
+        # 向量 ID 邏輯保持不變
+        if plan.get("vector_needed") and vector_result_ids is not None:
             if len(vector_result_ids) > 0:
                 ids_str = ",".join(str(int(x)) for x in vector_result_ids)
                 final_where.append(f"p.id IN ({ids_str})")

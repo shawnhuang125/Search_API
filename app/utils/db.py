@@ -1,22 +1,44 @@
 # utils/db.py
-# 用於讀取環境變數並進行資料庫連線
-import pymysql # 使用pymysql進行資料庫連線
+import aiomysql
+import asyncio
+import logging
 from app.config import Config
-# 資料庫連線
-def get_db_connection():
+
+# 全域變數，用於儲存連線池實例
+_db_pool = None
+
+async def get_async_db_pool():
     """
-    建立並回傳一個新的資料庫連線。
-    使用者要自己關閉 conn.close()。
+    獲取或初始化非同步資料庫連線池。
     """
-    return pymysql.connect(
-        host=Config.DB_HOST,
-        port=Config.DB_PORT,
-        user=Config.DB_USER,
-        password=Config.DB_PASSWORD,
-        database=Config.DB_NAME,
-        cursorclass=pymysql.cursors.DictCursor, # 讓查詢結果變成字典型態 (key: value)
-        
-        # 進階資料庫連線設定
-        autocommit=True,  # 可以手動控制 commit
-        charset="utf8mb4"  # 避免以後有人存 Emoji 你的資料庫會報錯
-    )
+    global _db_pool
+    if _db_pool is None:
+        try:
+            logging.info("[DB Utils] 正在初始化 aiomysql 連線池...")
+            _db_pool = await aiomysql.create_pool(
+                host=Config.DB_HOST,
+                port=Config.DB_PORT,
+                user=Config.DB_USER,
+                password=Config.DB_PASSWORD,
+                db=Config.DB_NAME,
+                minsize=5,       # 池中最小連線數
+                maxsize=20,      # 池中最大連線數
+                autocommit=True,
+                charset="utf8mb4",
+                cursorclass=aiomysql.DictCursor # 確保回傳字典格式
+            )
+            logging.info("[DB Utils] 連線池初始化成功")
+        except Exception as e:
+            logging.error(f"[DB Utils] 連線池初始化失敗: {e}")
+            raise e
+    return _db_pool
+
+async def close_db_pool():
+    """
+    在程式關閉時安全釋放連線池。
+    """
+    global _db_pool
+    if _db_pool is not None:
+        _db_pool.close()
+        await _db_pool.wait_closed()
+        logging.info("[DB Utils] 連線池已關閉")

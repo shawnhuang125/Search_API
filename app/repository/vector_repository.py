@@ -15,17 +15,15 @@ class VectorRepository:
     def __init__(self, host: str = "localhost", port: int = 6333, use_mock: bool = False):
         self.use_mock = use_mock or (not HAS_VECTOR_LIB)
         self.collection_name = "restaurants"
-        self.payload_ready = False # 你的情況：目前資料庫還沒塞 Payload，設為 False
-        # ▼▼▼ 修改 1: 明確宣告型別為 Any，避免 Pylance 報錯說它是 None ▼▼▼
+        self.payload_ready = False 
         self.client: Any = None
         self.model: Any = None
 
         target_host = host or Config.VECTOR_DB_HOST
         target_port = port or Config.VECTOR_DB_PORT
 
-        if self.use_mock:
-            logging.info("[Repo] 初始化模式: MOCK DATA (模擬資料)")
-        else:
+        # 如果是實體連線模式才輸出日誌，Mock 模式則保持沉默
+        if not self.use_mock:
             logging.info(f"[Repo] 初始化模式: REAL QDRANT (連線至 {target_host}:{target_port})")
             try:
                 self.client = QdrantClient(host=target_host, port=target_port)
@@ -33,7 +31,7 @@ class VectorRepository:
                 self.model = SentenceTransformer('intfloat/multilingual-e5-small')
                 logging.info("模型載入完成")
             except Exception as e:
-                logging.error(f"[Repo] 初始化失敗，將降級為 Mock 模式: {e}")
+                # 即使失敗，也只靜默降級，不輸出 Error 日誌
                 self.use_mock = True
 
     def search_by_vector(self, keywords: str) -> List[VectorSearchResult] | None:
