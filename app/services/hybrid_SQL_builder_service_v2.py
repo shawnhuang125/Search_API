@@ -293,25 +293,30 @@ class HybridSQLBuilder:
             logging.debug("[SQL Builder Debug] 節點為空，跳過解析")
             return None
 
-        # 1. 處理邏輯運算子節點 (AND/OR)
+        # 處理邏輯運算子節點 (AND/OR)
+        # 此區塊負責處理帶有子條件列表 (conditions) 的複合邏輯節點
         if "op" in node and "conditions" in node:
-            operator = node["op"].upper()
+            operator = node["op"].upper() # 取得運算子 (如 'and', 'or') 並轉大寫以符合 SQL 標準
             logging.debug(f"[SQL Builder Debug] 解析群組節點: {operator}, 子條件數: {len(node['conditions'])}")
             child_sqls = []
+            # 遍歷所有子條件，進行遞迴解析
             for i, child in enumerate(node["conditions"]):
+                # 【遞迴呼叫】繼續往深處解析，直到遇到葉節點 (實際的欄位比較)
                 child_sql = self._recursive_parse(child)
+                # 如果該子條件產生了有效的 SQL 片段 (非向量欄位或空值)，則加入清單
                 if child_sql:
                     child_sqls.append(child_sql)
                 else:
                     logging.debug(f"[SQL Builder Debug] 群組 {operator} 的第 {i} 個子條件解析結果為空")
-            
+            # 安全檢查：如果該群組內所有子條件解析後都沒有結果，則回傳 None 讓上層跳過此群組
             if not child_sqls: 
                 logging.debug(f"[SQL Builder Debug] 群組 {operator} 無任何有效子條件")
                 return None
-                
+            # 優化：如果群組內只有一個有效條件，就不需要額外包覆括號與運算子
             if len(child_sqls) == 1: 
                 return child_sqls[0]
-            
+            # 使用目前的運算子 (AND/OR) 串接所有子片段，並用括號封裝以確保運算優先權正確
+            # 例如: (p.rating > 4.5 OR p.address LIKE '%永康%')
             separator = f" {operator} "  
             combined_sql = f"({separator.join(child_sqls)})"
             logging.debug(f"[SQL Builder Debug] 組合群組 SQL: {combined_sql}")
@@ -323,8 +328,14 @@ class HybridSQLBuilder:
         node_data = node[key]
         val = node_data.get("value")
         cmp = node_data.get("cmp", "=").upper()
+
+        # --- [關鍵修正：統一脫殼] ---
+        # 只要 val 是只有一個元素的 list，不管 cmp 是什麼，先把它轉成純字串/數值
+        # 這樣後續不論走 IN 還是 LIKE 邏輯，item 都會是乾淨的
+        if isinstance(val, list) and len(val) == 1:
+            val = val[0]
         
-        # --- [核心追蹤] ---
+        # 核心追蹤
         logging.info(f"===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp} | 原始值: {val}")
 
         # 優先檢查向量欄位
@@ -332,9 +343,9 @@ class HybridSQLBuilder:
             logging.info(f"[SQL Builder Debug] '{key}' 判定為向量欄位，排除於 SQL 之外")
             return None
 
-        # --- 處理 JSON 設施標籤 ---
+        # 處理 JSON 設施標籤
         if key in self.facility_keys:
-            if val is not True: 
+            if val is not True:
                 logging.info(f"[SQL Builder Debug] 設施標籤 '{key}' 值為 {val} (非 True)，略過此條件")
                 return None
             # 從 sql_where_mapping 取得對應的新欄位名 (如 pa.has_air_conditioner)
@@ -342,7 +353,7 @@ class HybridSQLBuilder:
             if not db_col: return None
             p_name = f"p{self.param_counter}"
             # 數值改為 1 (TINYINT 1 代表 True)
-            self.query_params[p_name] = 1 
+            self.query_params[p_name] = 1
             self.param_counter += 1
             # 生成精確比對 SQL: "pa.has_air_conditioner = 1"
             sql_fragment = f"{db_col} = %({p_name})s"
@@ -352,44 +363,48 @@ class HybridSQLBuilder:
         # --- 處理一般 SQL 欄位 ---
         if key in self.sql_where_mapping:
             db_col = self.sql_where_mapping[key]
-            p_name = f"p{self.param_counter}"
+            # 注意：這裡先不要宣告 p_name，交給各分支處理 counter
+            
             fields_to_force_like = ["food_type", "restaurant_type", "restaurant_name", "merchant_categories", "address"]
 
-            # 處理cmp = in / not in的情況
-            if cmp in ["in", "not in"]:
-                # 確保 val 是列表，若不是則轉為單一元素的列表
+            # 統一脫殼：確保 val 只要是單一元素的 list 就轉成純字串
+            safe_val = val[0] if isinstance(val, list) and len(val) == 1 else val
+
+            # 強制模糊比對欄位
+            # 只要在名單內，不管 AI 給什麼 cmp，一律強制轉 LIKE
+            if key in fields_to_force_like or cmp == "LIKE":
+                p_name = f"p{self.param_counter}"
+                param_value = f"%{safe_val}%" # 此時 safe_val 已經是 '崑大路'
+                self.query_params[p_name] = param_value
+                self.param_counter += 1
+                sql_fragment = f"{db_col} LIKE %({p_name})s"
+                logging.debug(f"[SQL Builder Debug] 生成強制模糊 SQL: {sql_fragment} | {p_name}: {param_value}")
+                return sql_fragment
+
+            # 處理真正的集合查詢 (IN)
+            elif cmp in ["in", "not in"]:
                 val_list = val if isinstance(val, list) else [val]
                 p_names = []
-                
                 for item in val_list:
-                    p_name = f"p{self.param_counter}"
-                    self.query_params[p_name] = item
-                    p_names.append(f"%({p_name})s")
+                    current_p = f"p{self.param_counter}"
+                    self.query_params[current_p] = item
+                    p_names.append(f"%({current_p})s")
                     self.param_counter += 1
-                
-                # 組合成 (%(p0)s, %(p1)s, ...)
-                # 用於查詢用的查詢參數,防止SQL INJECTION
                 param_placeholders = ", ".join(p_names)
                 sql_fragment = f"{db_col} {cmp} ({param_placeholders})"
                 logging.debug(f"[SQL Builder Debug] 生成集合 SQL: {sql_fragment}")
                 return sql_fragment
             
-            # 處理cmp = LIKE的情況
-            if key in fields_to_force_like or cmp == "LIKE":
-                param_value = f"%{val}%"
-                self.query_params[p_name] = param_value
-                self.param_counter += 1
-                sql_fragment = f"{db_col} LIKE %({p_name})s"
+            # 一般精確比對
             else:
-                param_value = val
-                self.query_params[p_name] = param_value
+                p_name = f"p{self.param_counter}"
+                self.query_params[p_name] = safe_val
                 self.param_counter += 1
                 sql_fragment = f"{db_col} {cmp} %({p_name})s"
-                
-            logging.debug(f"[SQL Builder Debug] 生成一般欄位 SQL: {sql_fragment} | 參數 {p_name}: {param_value}")
-            return sql_fragment
+                logging.debug(f"[SQL Builder Debug] 生成一般 SQL: {sql_fragment}")
+                return sql_fragment
         
-        # --- [警告] 欄位未定義 ---
+        # 欄位未定義
         logging.warning(f"!!! [SQL Builder Warning] 欄位 '{key}' 找不到對應的 Mapping 配置，該條件被丟棄")
         return None
     
@@ -399,7 +414,7 @@ class HybridSQLBuilder:
         """
         生成用於計算總筆數的 SQL
         """
-        # --- 必須新增這兩行，確保 Count 查詢從 p0 開始，且不殘留舊參數 ---
+        # 確保 Count 查詢從 p0 開始，且不殘留舊參數 ---
         self.param_counter = 0 
         self.query_params = {}
 

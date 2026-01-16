@@ -91,13 +91,13 @@ async def generate_query_and_search(ai_to_api_data: dict = Body(...)): # 建議�
                     "search_status": search_status, # 顯示包括分頁資訊與查詢結果參數
                     "diagnostics": diagnostics,   # 顯示詳細的錯誤訊息
                     "vector_search_info": vector_search_info,  # 說明本次搜尋不做向量搜尋
-                    "generated_query": {
-                        "sql": final_sql,           # 該次查詢的SQL SCRIPTS
-                        "params": query_params      # 該次查詢的SQL Params查詢參數,為了防止SQL INJECTION
-                    },
-                    "performance": {
-                        "sql_execution_time_sec": round(sql_duration, 4) # 取小數點後4位比較好看
-                    },
+                    #"generated_query": {
+                        #"sql": final_sql,           # 該次查詢的SQL SCRIPTS
+                        #"params": query_params      # 該次查詢的SQL Params查詢參數,為了防止SQL INJECTION
+                    #},
+                    #"performance": {
+                    #    "sql_execution_time_sec": round(sql_duration, 4) # 取小數點後4位比較好看
+                    #},
                     "final_results": db_results         # 搜尋結果
                 }
             }

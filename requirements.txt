@@ -6,8 +6,6 @@ pydantic[email]==2.5.3
 python-dotenv
 aiomysql==0.2.0
 pymysql
-cryptography
-requests
 mysql-connector-python
 qdrant-client
 sentence-transformers

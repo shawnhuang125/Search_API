@@ -34,4 +34,4 @@ if __name__ == "__main__":
     # host: 監聽地址
     # port: 埠號 (你原本設定 5004)
     # reload: 等同於 Flask 的 debug=True (僅建議開發環境使用)
-    uvicorn.run("run:app", host="0.0.0.0", port=5004, reload=False)
+    uvicorn.run("run:app", host="0.0.0.0", port=5004, reload=False,log_level="info")
