@@ -27,11 +27,17 @@ class VectorRepository:
             logging.info(f"[Repo] 初始化模式: REAL QDRANT (連線至 {target_host}:{target_port})")
             try:
                 self.client = QdrantClient(host=target_host, port=target_port)
-                logging.info("正在載入 Embedding 模型 (intfloat/multilingual-e5-small)...")
-                self.model = SentenceTransformer('intfloat/multilingual-e5-small')
-                logging.info("模型載入完成")
+                # 更改模型路徑
+                model_name = './m3_food_finetuned'
+                logging.info(f"正在載入 BGE-M3 嵌入模型...")
+                
+                self.model = SentenceTransformer(model_name)
+                
+                # BGE-M3 建議在檢索時，Query 端可以加上特定的 prefix (選配，視微調情況而定)
+                # 但在 SentenceTransformers 中直接使用即可
+                logging.info("BGE-M3 模型載入完成")
             except Exception as e:
-                # 即使失敗，也只靜默降級，不輸出 Error 日誌
+                logging.info("模型載入失敗，切換至 Mock 模式")
                 self.use_mock = True
 
     def search_by_vector(self, keywords: str) -> List[VectorSearchResult] | None:
@@ -50,20 +56,23 @@ class VectorRepository:
     def _search_qdrant_logic(self, keywords: str) -> List[VectorSearchResult]:
         results = []
         
-        # 修改 2: 加入防呆檢查，告訴 Pylance 這裡絕對不會是 None
         if self.client is None or self.model is None:
             logging.error("[Repo] Qdrant client 或 Model 未正確初始化")
             return []
 
         try:
-            # Pylance 現在知道 self.model 不是 None 了，不會報錯
-            query_vector = self.model.encode(keywords).tolist()
+            # 修改 1: 加入 normalize_embeddings，這對 BGE 系列效果更好
+            # 如果顯存吃緊，可以考慮加入 batch_size=1
+            query_vector = self.model.encode(
+                keywords, 
+                normalize_embeddings=True 
+            ).tolist()
 
-            # Pylance 現在知道 self.client 不是 None 了
+            # 修改 2: 這裡建議把 limit 變成變數，方便未來調整
             search_result = self.client.search(
                 collection_name=self.collection_name,
                 query_vector=query_vector,
-                limit=5,
+                limit=10,  # 稍微放寬一點，讓後面的 RAG 有更多素材
                 with_payload=True
             )
 
@@ -73,6 +82,7 @@ class VectorRepository:
                 p = point.payload
                 if not p: continue
                 
+                # 這裡保留你原本的 DTO 轉換邏輯
                 dto = VectorSearchResult(
                     id=p.get("id"),
                     name=p.get("name", "Unknown"),

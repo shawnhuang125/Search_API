@@ -15,6 +15,7 @@ class HybridSQLBuilder:
             "phone": "p.phone",       
             "website": "p.website",
             "opening_hours": "p.opening_hours",
+            "user_ratings_total": "p.user_ratings_total",
             #"time": "p.opening_hours",             # 額外支援 time
             "food_type": "pa.food_type",
             "cuisine_type": "pa.cuisine_type",
@@ -45,6 +46,7 @@ class HybridSQLBuilder:
             "website": "p.website",   
             "food_type": "pa.food_type",
             "opening_hours": "p.opening_hours",
+            "user_ratings_total": "p.user_ratings_total",
             "time": "p.opening_hours",             # 支援 logic_tree 傳入 time
             "address": "p.address", 
             "rating": "p.rating",
@@ -147,7 +149,8 @@ class HybridSQLBuilder:
                 "id": "p.id",
                 "restaurant_name": "p.name", # 強制回傳名稱
                 "address": "p.address",
-                "rating": "p.rating"
+                "rating": "p.rating",
+                "reviews_count": "p.reviews_count"
             }
             
             for key, db_col in base_fields.items():

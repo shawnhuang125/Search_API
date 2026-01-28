@@ -2,10 +2,21 @@
 fastapi==0.109.0
 uvicorn[standard]==0.27.0
 pydantic[email]==2.5.3
-
 python-dotenv
+
 aiomysql==0.2.0
 pymysql
 mysql-connector-python
-qdrant-client
-sentence-transformers
+qdrant-client>=1.16.2
+grpcio>=1.76.0
+
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+numpy<2.0.0
+torch==2.1.2+cu121
+torchvision==0.16.2+cu121
+torchaudio==2.1.2+cu121
+
+sentence-transformers==2.2.2
+typing-extensions>=4.12
+urllib3>=1.26.14,<3

@@ -64,15 +64,35 @@ async def generate_query_and_search(ai_to_api_data: dict = Body(...)): # 建議�
                     vector_search_info["message"] = "向量資料庫 Payload 尚未就緒，已跳過語意比對，僅回傳精確匹配結果。"
                     logging.warning("[Search] 向量功能未就緒，跳過比對")
                 else:
-                    # 如果以後支援了，邏輯如下：
-                    # rdbms_ids = [row.get("id") for row in db_results]
-                    # raw_results = vector_repo.search_in_ids(plan["vector_keywords"][0], rdbms_ids)
-                    # vector_search_info["status"] = "success"
-                    # vector_search_info["details"] = [vars(item) for item in raw_results]
-                    pass
-            # 4. 取得搜尋狀態 (此處會包含強化後的診斷建議)
+                    # 取得關聯式資料庫的搜尋結果的店家ID列表
+                    rdbms_ids = [row.get("id") for row in db_results]
+                    # 呼叫 VectorService 進行混合加權排序 (取代原本的直接查詢)
+                    # 這裡建議將實體化 Service 移到 try 區塊開頭，或者直接使用
+                    from app.services.vector_service import VectorService
+                    v_service = VectorService() # 或使用已存在的實例
+                    
+                    # 執行包含 (相似度*0.6 + 評分*0.3 + 人氣*0.1) 的排序邏輯
+                    ranked_results = await v_service.search_and_rank(
+                        keywords=plan["vector_keywords"],
+                        db_results=db_results, # 傳入 RDBMS 資料以獲取評分與評論數
+                        top_k=3
+                    )
+
+                    if ranked_results:
+                        # 將最終結果更新為加權後的前三名
+                        db_results = ranked_results
+                        vector_search_info["status"] = "success"
+                        vector_search_info["message"] = f"已完成混合權重排序，從 {len(rdbms_ids)} 筆中篩選前 3 名"
+                        vector_search_info["details"] = [{"id": r["id"], "score": r.get("hybrid_score")} for r in ranked_results]
+                    else:
+                        vector_search_info["status"] = "no_match"
+                        vector_search_info["message"] = "向量搜尋未找到相符結果，維持原搜尋排序"
+
+
+
+            # 取得搜尋狀態 (此處會包含強化後的診斷建議)
             search_status = check_search_status(db_results, plan, total_count=total_count)
-            # --- 關鍵改動：建立 diagnostics 區塊 ---
+            # 建立 diagnostics 區塊
             diagnostics = None
             if not db_results:
                 diagnostics = {
