@@ -38,3 +38,5 @@ m3_food_finetuned/
 
 # 如果你只想針對特定的 JSON 檔案（例如截圖中的格式化資料）
 formatted_data_*.json
+# 移除qdrant的連線測試檔案
+test_qdrant.py
