@@ -29,3 +29,12 @@ Thumbs.db
 # --- 資料庫相關 (如果未來有本地 SQLite) ---
 *.sqlite3
 *.db
+
+# 阻止上傳微調後的模型資料夾
+m3_food_finetuned/
+
+# 阻止上傳目錄下所有的 JSON 檔案
+*.json
+
+# 如果你只想針對特定的 JSON 檔案（例如截圖中的格式化資料）
+formatted_data_*.json

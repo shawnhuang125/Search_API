@@ -1,6 +1,8 @@
 # app/utils/data_formatter.py
 import json
+
 from app.config import Config # 引入 Config 來讀取 base_url 
+from typing import Optional
 # 
 def enrich_results_with_photos(results, plan):
     """
@@ -182,3 +184,15 @@ def check_search_status(db_results, plan, total_count=0):
             status_info["suggestion"] = "查無資料，建議調整搜尋範圍。"
             
     return status_info
+
+def generate_diagnostics(db_results: list, plan: dict, query_params: dict) -> Optional[dict]:
+    """當搜尋無結果時，產生診斷資訊供前端/AI 參考"""
+    if db_results:
+        return None
+        
+    return {
+        "active_filters": query_params,
+        "reason": "目前過濾條件組合過於嚴苛，導致資料庫無相符結果",
+        "debug_logic_tree": plan.get("raw_logic_tree"),
+        "sql_fragment": plan.get("generated_where_clause")
+    }
