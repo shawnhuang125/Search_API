@@ -1,8 +1,4 @@
-# config.py是用來讀取.env裏面的變數的系統設定檔案
-# 任何地方都可呼叫使用
-# 用法:
-# from app.config import Config
-# logging.info(f"Database initialization completed. Host: {Config.DB_HOST}, Port:{Config.DB_PORT}")
+# app/config.py
 import os
 from dotenv import load_dotenv
 

@@ -1,4 +1,4 @@
-# 引入必要的非同步庫
+# app/repository/rdbms_repository.py
 import time
 import asyncio
 from typing import List, Dict, Any, Tuple 

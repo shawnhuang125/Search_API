@@ -1,5 +1,4 @@
-# /utils/security.py
-# 這裡專門存放安全處理的工具程式
+# app/utils/security.py
 import hashlib
 
 # 密碼Hash雜湊加密

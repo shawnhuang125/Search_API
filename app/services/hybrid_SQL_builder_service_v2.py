@@ -1,3 +1,4 @@
+# app/services/hybrid_SQL_builder_service_v2.py
 import json
 from app.utils.distance_utils import get_haversine_distance_sql # 匯入距離計算的SQL生成器
 import logging
@@ -224,22 +225,31 @@ class HybridSQLBuilder:
                 # 遞迴檢查每一個子條件
                 self._scan_for_vector_intent(child, plan, s_id)
         else:
-            # 這是葉節點 (Leaf Node)，也就是實際的過濾條件
-            # 取得欄位名稱 (例如 "flavor")並放入list容器
+            # 這是葉節點 (Leaf Node)
             key = list(node.keys())[0]
             val = node[key]["value"]
-            # 哪些欄位即便 SQL 查過了，向量庫也要參與排序 (混血欄位)
-            hybrid_fields = {"food_type", "cuisine_type"}
             
-            # 2. 判斷是否需要啟用向量搜尋
-            # 只要 key 屬於純向量欄位 (如 flavor) 或是 混血欄位 (如 food_type)
+            # --- 強化後的處理邏輯 ---
+            # 1. 統一將所有 value 處理成字串或字串列表
+            if isinstance(val, list):
+                if len(val) == 1:
+                    # 只有一個元素，直接脫殼變成純字串 (如 ["火鍋"] -> "火鍋")
+                    processed_val = str(val[0])
+                else:
+                    # 有多個元素，合併成逗號分隔的字串，或保持列表 (建議轉字串對語意搜尋較友善)
+                    processed_val = ",".join([str(i) for i in val])
+            else:
+                # 本來就是單一值，轉成字串
+                processed_val = str(val)
+            
+            # 哪些欄位即便 SQL 查過了，向量庫也要參與排序 (混血欄位)
+            hybrid_fields = {"food_type", "cuisine_type","flavor"}
+            
             if key in self.vector_fields or key in hybrid_fields:
                 plan["vector_needed"] = True  
-                
-                # 存成鍵值對形式，讓 VectorService 生成強化的 query_str
-                plan["vector_keywords"][key] = val
-                
-                logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意加強欄位: {key} = {val}")
+                # 存入處理後的純字串
+                plan["vector_keywords"][key] = processed_val 
+                logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意加強欄位: {key} = {processed_val}")
 
     # 負責將邏輯樹轉成sql字串
     # 會接收關鍵參數 vector_result_ids:這是向量資料庫搜尋完後回傳的Place id列表

@@ -1,3 +1,4 @@
+# app/services/vector_service.py
 from typing import List, Dict, Any, Optional
 from app.repository.vector_repository import VectorRepository
 from sentence_transformers import SentenceTransformer
@@ -19,7 +20,6 @@ class VectorService:
     ) -> Optional[List[Dict[str, Any]]]:
         
         s_id = plan.get("s_id", "unknown_sid")
-        info = {"status": "skipped", "message": "No vector search needed", "details": []}
 
         logging.info(f"[Vector Service][SID: {s_id}] === 進入向量處理階段 ===")
         logging.info(f"[Vector Service][SID: {s_id}] 接收關鍵字 (keywords): {keywords}")
@@ -32,7 +32,7 @@ class VectorService:
 
         info = {"status": "skipped", "message": "No vector search needed", "details": []}
         
-        # 1. 檢查是否沒有向量需求
+        # 檢查是否沒有向量需求
         if not plan.get("vector_needed") or not db_results:
             logging.info(f"[Vector Service][SID: {s_id}] 不需要向量搜尋，進入保底排序")
             return self._apply_fallback_sorting(db_results, plan, top_k), info
@@ -44,7 +44,7 @@ class VectorService:
             kv_str = " ".join(kv_pairs)
             
             # 提取主要價值（如火鍋）來建構自然語言 Prompt
-            main_values = ", ".join(keywords.values())
+            main_values = ", ".join([str(v) for v in keywords.values()])
             query_str = f"尋找符合 {kv_str} 特徵的店家，我想吃 {main_values}，這是一間專門提供 {main_values} 的餐廳"
         elif isinstance(keywords, list) and keywords:
             query_str = f"我想吃 {', '.join(keywords)}，這是一間 {', '.join(keywords)} 餐廳"
@@ -59,7 +59,7 @@ class VectorService:
 
         logging.info(f"[Vector Service][SID: {s_id}] 執行向量過濾搜尋 (SQL IDs 數量: {len(rdbms_ids)})")
 
-        # 3. 執行向量搜尋
+        # 執行向量搜尋
         vector_results: Optional[List[VectorSearchResult]] = await self.repo.search_in_ids(query_str, rdbms_ids)
         
         # 4. 判斷搜尋結果是否為空 (這裡做一次動作就好)
@@ -68,16 +68,16 @@ class VectorService:
             info.update({"status": "no_match", "message": "向量搜尋未找到結果，採用保底排序"})
             return self._apply_fallback_sorting(db_results, plan, top_k), info
         
-        # --- [新增] 向量命中 Log ---
+        # 向量命中 Log
         logging.info(f"[Vector Service][SID: {s_id}] 向量庫命中 {len(vector_results)} 筆，最高原始分數: {vector_results[0].score if vector_results else 'N/A'}")
 
-        # 5. 執行權重排序 (Hybrid Ranking)
+        # 執行權重排序 (Hybrid Ranking)
         final_results = await self._apply_hybrid_ranking(vector_results, db_results, top_k, plan, info)
         
-        # 6. 成功後的日誌：這時候才有 final_results 可以印！
+        # 成功後的日誌：這時候才有 final_results 可以印！
         if final_results:
             top_info = [f"{r.get('id')}({r.get('restaurant_name')})" for r in final_results[:3]]
-            logging.info(f"[Vector Service][SID: {s_id}] 混合排序完成，前三名推薦: {', '.join(top_info)}")
+            logging.info(f"[Vector Service][SID: {s_id}] 混合排序完成，前{top_k}名推薦: {', '.join(top_info)}")
         else:
             logging.warning(f"[Vector Service][SID: {s_id}] 混合排序後無匹配結果")
 
@@ -92,10 +92,12 @@ class VectorService:
         plan: Dict[str, Any], 
         info: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        
-        
 
-        # 將 db_results 轉為 map 方便快速比對
+        # 將 db_results 轉為Hash Map方便快速比對
+        # hash map內容如:db_map = {
+        # "42": {"id": "42", "name": "鼎泰豐", "rating": 4.5},
+        # "99": {"id": "99", "name": "老四川", "rating": 4.8}
+        # }
         db_map = {str(row['id']): row for row in db_results}
         
         # 找出最大評論數用於歸一化 (避免除以零)
@@ -109,7 +111,7 @@ class VectorService:
             # 即使需要距離，語意權重也要拉高，否則會推薦「超近但完全不相關」的店
             weights = {"sim": 0.5, "rating": 0.1, "pop": 0.1, "dist": 0.3}
         else:
-            # 預設模式：將語意相似度設為絕對主導，確保「火鍋」是第一優先
+            # 預設模式：將語意相似度設為絕對主導，確保是第一優先
             weights = {"sim": 0.8, "rating": 0.1, "pop": 0.1, "dist": 0.0}
 
         ranked_list = []

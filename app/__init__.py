@@ -1,3 +1,4 @@
+# app/__init__.py
 import logging
 import os
 from logging.handlers import QueueHandler, QueueListener, TimedRotatingFileHandler

@@ -1,3 +1,4 @@
+# app/utils/quality_checker.py
 def evaluate_search_quality(db_results, vector_search_info, plan):
     """
     評估搜尋品質，並生成對 AI 的行為指示。
