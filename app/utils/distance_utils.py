@@ -8,7 +8,7 @@ def get_haversine_distance_sql(user_lat,user_lng, lat_col="p.lat", lng_col="p.ln
     # param lat_col:店家的緯度
     # param lng_col:店家的經度
     # return: SQL字串 (單位:公里)
-    R = 6371000 # 地球的半徑(單位:公尺)
+    R_METERS = 6371000 # 地球的半徑(單位:公尺)
     try:
         # 嘗試轉成浮點數
         lat = float(user_lat)
@@ -25,11 +25,11 @@ def get_haversine_distance_sql(user_lat,user_lng, lat_col="p.lat", lng_col="p.ln
     # 生成SQL
     # 使用MySQL的數學函式
     sql = f"""
-    ROUND(
-        {R} * acos(
+    (
+        ({R_METERS} * acos(
             cos(radians({lat})) * cos(radians({lat_col})) * cos(radians({lng_col}) - radians({lng})) + 
             sin(radians({lat})) * sin(radians({lat_col}))
-        )
+        )) / 1000.0
     )
     """
     return sql.strip()

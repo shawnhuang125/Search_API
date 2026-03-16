@@ -13,13 +13,11 @@ class RdbmsRepository:
 
     # 這裡加入 s_id 參數，預設為 None 增加相容性
     async def execute_dynamic_query(self, sql: str, params: Dict[str, Any], s_id: str = None) -> Tuple[List[Dict[str, Any]], float]:
-        # 調用非同步實作並等待結果
-        return await self._execute_real_db(sql, params, s_id)
-
-    async def _execute_real_db(self, sql: str, params: Dict[str, Any], s_id: str = None) -> Tuple[List[Dict[str, Any]], float]:
-        connection = None
+        """
+        執行動態 SQL 查詢並回傳結果與執行時間。
+        合併了原始的 _execute_real_db 邏輯。
+        """
         start_time = time.time()
-        # 建立一個辨識字串，方便 Log 閱讀
         log_prefix = f"[RDBMS Repo][SID: {s_id}]" if s_id else "[RDBMS Repo]"
         
         try:
@@ -27,29 +25,30 @@ class RdbmsRepository:
             async with pool.acquire() as conn:
                 async with conn.cursor(aiomysql.DictCursor) as cursor:
                     
-                    # 使用 s_id 列印除錯資訊
-                    logging.info(f"{log_prefix} SQL 語句: {sql}")
-                    logging.info(f"{log_prefix} 綁定參數內容與型別: " + 
-                                 ", ".join([f"{k}: {v} ({type(v).__name__})" for k, v in params.items()]))
+                    # 1. Log 記錄 (參數內容與型別檢查對除錯非常有幫助)
+                    logging.info(f"{log_prefix} 執行 SQL: {sql}")
+                    param_info = ", ".join([f"{k}: {v} ({type(v).__name__})" for k, v in params.items()])
+                    logging.info(f"{log_prefix} 綁定參數: {param_info}")
                     
+                    # 2. 執行查詢
                     await cursor.execute(sql, params)
                     records = await cursor.fetchall()
                     
-                    end_time = time.time()
-                    execution_time = end_time - start_time
+                    # 3. 計算執行時間
+                    execution_time = time.time() - start_time
                     
+                    # 4. 結果診斷
                     if records:
-                        sample = records[0]
-                        logging.info(f"{log_prefix} 取得第一筆原始資料範例: {sample}")
+                        logging.info(f"{log_prefix} 取得第一筆資料範例: {records[0]}")
                     else:
-                        logging.warning(f"{log_prefix} 查詢結果為空，請檢查 SQL 條件或資料庫編碼")
+                        logging.warning(f"{log_prefix} 查詢結果為空，請確認資料庫是否有對應資料")
                     
-                    logging.info(f"{log_prefix} 查詢成功，取得 {len(records)} 筆資料，耗時: {execution_time:.5f}秒")
+                    logging.info(f"{log_prefix} 成功取得 {len(records)} 筆資料，耗時: {execution_time:.5f}秒")
                     return list(records), execution_time
 
         except aiomysql.Error as e:
-            logging.error(f"{log_prefix} 資料庫錯誤: {e}")
+            logging.error(f"{log_prefix} 資料庫層級錯誤: {e}")
             return [], 0.0
         except Exception as e:
-            logging.error(f"{log_prefix} 系統錯誤: {e}")
+            logging.error(f"{log_prefix} 系統程式碼錯誤: {e}")
             return [], 0.0

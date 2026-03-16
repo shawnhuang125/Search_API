@@ -6,7 +6,7 @@ load_dotenv()
 
 class Config:
     SECRET_KEY = os.getenv("SECRET_KEY", "dev_key") # 如果沒有flask需要使用的SECRET_KEY參數則預設為dev_key
-
+    COLLECTION_NAME = os.getenv("COLLECTION_NAME", "")
     DB_HOST = os.getenv("DB_HOST", "127.0.0.1") # 如果沒有資料庫host,預設為127.0.0.1也就是本機端連線
     DB_PORT = int(os.getenv("DB_PORT", 3306)) # 如果沒有資料庫Port,預設為3306
     DB_USER = os.getenv("DB_USER", "root") # 如果沒有資料庫user,預設為root

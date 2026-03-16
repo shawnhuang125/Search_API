@@ -1,10 +1,12 @@
 # app/services/vector_service.py
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional,Tuple
 from app.repository.vector_repository import VectorRepository
 from sentence_transformers import SentenceTransformer
 from app.models.search_dto import VectorSearchResult
 import math
 import logging
+import numpy as np
+import math
 
 class VectorService:
     def __init__(self):
@@ -13,45 +15,84 @@ class VectorService:
     # 檢查向量需求 - 向量搜尋 - 權重計算與排序
     async def search_and_rank(
         self, 
-        keywords: Any, 
         db_results: List[Dict[str, Any]], 
         plan: Dict[str, Any], 
+        total_count: int = 0,
         top_k: int = 3
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        
+        info = {"status": "init", "message": "", "is_fallback": False}
         
         s_id = plan.get("s_id", "unknown_sid")
+        keywords = plan.get("vector_keywords")
 
         logging.info(f"[Vector Service][SID: {s_id}] === 進入向量處理階段 ===")
         logging.info(f"[Vector Service][SID: {s_id}] 接收關鍵字 (keywords): {keywords}")
         logging.info(f"[Vector Service][SID: {s_id}] 候選店家筆數 (SQL Results): {len(db_results)}")
 
-        if db_results:
-            # 抽樣前 3 筆顯示店家屬性，幫助除錯為什麼沒有火鍋
-            sample_data = [{ "name": r.get('restaurant_name'), "cat": r.get('merchant_categories'), "tags": r.get('facility_tags') } for r in db_results[:3]]
-            logging.info(f"[Vector Service][SID: {s_id}] SQL 候選範例 (前3筆): {sample_data}")
+        # 攔截 Case 0: 完全查無店家
+        if total_count == 0 or not db_results:
+            logging.warning(f"[Vector Service][SID: {s_id}] Case 0: SQL 查無店家，直接中斷")
+            info.update({
+                "status": "sql_no_data", 
+                "message": "資料庫中沒有符合關鍵字或營業狀態的店家。",
+                "is_fallback": True
+            })
+            return [], info
 
-        info = {"status": "skipped", "message": "No vector search needed", "details": []}
+        # 只要執行到這，代表一定有資料 (Case 1 or N)
+        # 統一輸出抽樣日誌，幫助除錯 (包含店名、類別、標籤，建議加上距離)
+        sample_data = [{ 
+            "name": r.get('restaurant_name'), 
+            "cat": r.get('merchant_categories'), 
+            "dist": f"{r.get('distance', 0):.2f}km", # 加上距離更專業
+            "tags": r.get('facility_tags') 
+        } for r in db_results[:3]]
         
-        # 檢查是否沒有向量需求
-        if not plan.get("vector_needed") or not db_results:
-            logging.info(f"[Vector Service][SID: {s_id}] 不需要向量搜尋，進入保底排序")
-            return self._apply_fallback_sorting(db_results, plan, top_k), info
+        logging.info(f"[Vector Service][SID: {s_id}] SQL 命中 {len(db_results)} 筆 (總數: {total_count})")
+        logging.info(f"[Vector Service][SID: {s_id}] 候選範例: {sample_data}")
+        
 
-        # 將字典內容轉換為鍵值對字串，例如 {"food_type": "火鍋"} -> "food_type 火鍋"
+        # 建立一個映射字典，把英文 Key 對應回你 passage 裡使用的中文詞彙
+        KEY_MAP = {
+            "cuisine_type": "菜系",
+            "food_type": "食物種類",
+            "flavor": "口味",
+            "service_tags": "服務標籤"
+        }
+
         if isinstance(keywords, dict) and keywords:
-            # 建立結構化描述：這能幫助模型更精確定位特定欄位的特徵
-            kv_pairs = [f"{k} {v}" for k, v in keywords.items()]
-            kv_str = " ".join(kv_pairs)
+            semantic_pairs = []
+            target_values_list = []
             
-            # 提取主要價值（如火鍋）來建構自然語言 Prompt
-            main_values = ", ".join([str(v) for v in keywords.values()])
-            query_str = f"尋找符合 {kv_str} 特徵的店家，我想吃 {main_values}，這是一間專門提供 {main_values} 的餐廳"
+            for k, v in keywords.items():
+                # 把英文 key 轉成中文，如果找不到對應的，就先用原本的 key
+                chinese_key = KEY_MAP.get(k, k) 
+                
+                # 格式：[中文特徵名]是[中文內容] -> 例如: "食物種類是火鍋"
+                semantic_pairs.append(f"主打的{chinese_key}是{v}")
+                target_values_list.append(str(v))
+            
+            # 結構化特徵字串: "主打的食物種類是火鍋，主打的口味是麻辣"
+            feature_description = "，".join(semantic_pairs)
+            target_values = "、".join(target_values_list)
+            
+            # 最終組合：高度對齊 passage 的語法，並加入使用者的強烈意圖
+            query_str = (
+                f"我想找一家餐廳，{feature_description}。"
+                f"我想吃{target_values}，請推薦符合這些特色的美食。"
+            )
+
         elif isinstance(keywords, list) and keywords:
-            query_str = f"我想吃 {', '.join(keywords)}，這是一間 {', '.join(keywords)} 餐廳"
+            target_keywords = "、".join([str(i) for i in keywords])
+            query_str = f"我想找關於{target_keywords}的餐廳。請推薦主打{target_keywords}的美食。"
+            
         elif keywords:
-            query_str = f"我想吃 {keywords}，這是一間 {keywords} 餐廳"
+            target_keywords = str(keywords)
+            query_str = f"我想找{target_keywords}的餐廳。請推薦好吃的{target_keywords}。"
+            
         else:
-            query_str = "推薦美食餐廳"
+            query_str = "請推薦附近好吃的美食餐廳。"
 
         logging.info(f"[Vector Service][SID: {s_id}] 最終送往向量庫的字串: '{query_str}'")
 
@@ -61,15 +102,35 @@ class VectorService:
 
         # 執行向量搜尋
         vector_results: Optional[List[VectorSearchResult]] = await self.repo.search_in_ids(query_str, rdbms_ids)
+        if vector_results:
+            logging.info(f"📊 [診斷][SID: {s_id}] 向量庫原始回傳前 5 筆分數: {[r.score for r in vector_results[:5]]}")
+        else:
+            logging.warning(f"❌ [診斷][SID: {s_id}] 向量庫回傳空結果，請確認 Qdrant 裡的 ID 是否與 SQL 對得上")
         
-        # 4. 判斷搜尋結果是否為空 (這裡做一次動作就好)
-        if not vector_results:
-            logging.warning(f"[Vector Service][SID: {s_id}] 向量搜尋回傳 0 筆，採用保底排序")
-            info.update({"status": "no_match", "message": "向量搜尋未找到結果，採用保底排序"})
+        # 定義相似度門檻
+        SCORE_THRESHOLD = 0.4
+
+        # 安全地取得最高分 (如果沒結果就給 0)
+        best_score = vector_results[0].score if vector_results else 0.0
+
+        # 4. 判斷搜尋結果是否失效 (無結果 或 分數低於門檻)
+        if not vector_results or best_score < SCORE_THRESHOLD:
+            # 根據不同情況給予 Log 訊息
+            reason = "向量搜尋回傳 0 筆" if not vector_results else f"相似度太低 ({best_score:.4f})"
+
+            
+            logging.warning(f"[Vector Service][SID: {s_id}] {reason}，採用保底排序")
+            
+            info.update({
+                "status": "vector_no_match", 
+                "message": f"找不到足夠精確的匹配 (相關度: {best_score:.2f})，已切換為評價排序。",
+                "is_fallback": True
+            })
+            # 直接跳過 Hybrid Ranking，執行保底排序 (回傳星等或距離最高的前三名)
             return self._apply_fallback_sorting(db_results, plan, top_k), info
         
-        # 向量命中 Log
-        logging.info(f"[Vector Service][SID: {s_id}] 向量庫命中 {len(vector_results)} 筆，最高原始分數: {vector_results[0].score if vector_results else 'N/A'}")
+        # --- 只有分數達標，才印出命中 Log 並執行 Hybrid Ranking ---
+        logging.info(f"[Vector Service][SID: {s_id}] 向量庫命中 {len(vector_results)} 筆，最高原始分數: {best_score:.4f}")
 
         # 執行權重排序 (Hybrid Ranking)
         final_results = await self._apply_hybrid_ranking(vector_results, db_results, top_k, plan, info)
@@ -86,120 +147,116 @@ class VectorService:
     # 根據向量查詢結果進行權重運算與排序
     async def _apply_hybrid_ranking(
         self, 
-        vector_results: List[VectorSearchResult], 
+        vector_results: List[Any], 
         db_results: List[Dict[str, Any]], 
         top_k: int,
         plan: Dict[str, Any], 
         info: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-
-        # 將 db_results 轉為Hash Map方便快速比對
-        # hash map內容如:db_map = {
-        # "42": {"id": "42", "name": "鼎泰豐", "rating": 4.5},
-        # "99": {"id": "99", "name": "老四川", "rating": 4.8}
-        # }
+        
         db_map = {str(row['id']): row for row in db_results}
+        s_id = plan.get("s_id", "unknown")
         
-        # 找出最大評論數用於歸一化 (避免除以零)
+        # 動態權重向量
+        sort_conditions = plan.get("sort_conditions", [])
+        weights = {"sim": 0.80, "rating": 0.15, "pop": 0.05, "dist": 0.0}
+        sort_strategy = "預設語意優先"
+
+        if sort_conditions:
+            primary_sort = sort_conditions[0].get("field")
+            if primary_sort == "distance":
+                weights = {"sim": 0.40, "dist": 0.50, "rating": 0.10, "pop": 0.0}
+                sort_strategy = "距離優先"
+            elif primary_sort == "rating":
+                weights = {"sim": 0.50, "rating": 0.40, "pop": 0.10, "dist": 0.0}
+                sort_strategy = "評價優先"
+
+        # 準備矩陣與數據
+        valid_ids = []
+        data_list = []
+        
         all_counts = [row.get('user_ratings_total', 0) for row in db_results]
-        max_val = max(all_counts) if all_counts else 1
-        max_reviews_log = math.log1p(max_val) if max_val > 0 else 1
-        
-        # 動態配置權重
-        #　如果有距離排序需求
-        if plan.get("distance_needed", False):
-            # 即使需要距離，語意權重也要拉高，否則會推薦「超近但完全不相關」的店
-            weights = {"sim": 0.5, "rating": 0.1, "pop": 0.1, "dist": 0.3}
-        else:
-            # 預設模式：將語意相似度設為絕對主導，確保是第一優先
-            weights = {"sim": 0.8, "rating": 0.1, "pop": 0.1, "dist": 0.0}
-
-        ranked_list = []
-        best_stores = {}
-
-        match_count = 0  #除錯用
+        max_reviews_log = math.log1p(max(all_counts)) if all_counts and max(all_counts) > 0 else 1.0
 
         for v in vector_results:
             v_id = str(v.id)
             if v_id in db_map:
-                match_count += 1
-                store = db_map[v_id].copy()
+                store = db_map[v_id]
+                similarity_score = float(v.score)   # 取出該店的餘弦相似度並正規化
+                rating_score = float(store.get('rating', 0)) / 5.0  # 取出該店的評論星等分數並正規化
+                popularity_score = math.log1p(store.get('user_ratings_total', 0)) / max_reviews_log # 取出該店的人氣數並正規化
                 
-                # 語意相似度 (0.0 - 1.0)
-                sim_score = v.score
+                dist_m = float(store.get("distance", 0))    # 取出該店的距離分數並正規化
+                distance_score = 1.0 / (1.0 + (dist_m / 1000.0))    # 取出該店的距離分數並正規化
                 
-                # 星等分數 (0-1)
-                rating_score = float(db_map[v_id].get('rating', 0)) / 5.0
+                data_list.append([similarity_score, rating_score, popularity_score, distance_score]) # 把每一家店家的四項指標存入矩陣
+                valid_ids.append(v_id)
+
+        if not data_list: return [] # 如果整個矩陣是空的那就回傳空陣列並結束程式
+
+        matrix = np.array(data_list) # 把dist_list轉成numpy矩陣,也為了數據的純淨性
+        w_vector = np.array([weights["sim"], weights["rating"], weights["pop"], weights["dist"]]) # 根據用戶需求決定的權重封裝成一個長度為 4 的向量。如: w = [w_{sim}, w_{rating}, w_{pop}, w_{dist}]
+        eps = 1e-6 # 對剛開的店的補助,避免程式因為對0取對數富像無限大從而當機,此為10的-6次方
+        
+        # 核心運算：對數空間點積
+        # 為了將線性空間的特徵值映射到對數流形 (Log-manifold)
+        log_matrix = np.log(matrix + eps)
+        
+        # 我們不直接做 dot，而是用元素相乘 (Element-wise multiplication)
+        # 這樣會得到一個 N x 4 的矩陣，裡面存著每個店家的每個維度實際加了多少分
+        contribution_matrix = log_matrix * w_vector 
+        
+        # 總分依然是橫向加總
+        total_log_scores = np.sum(contribution_matrix, axis=1)
+        # 為了實現非線性的幾何聚合 (Non-linear Geometric Aggregation)
+        # 沒有以下這一行其實只是換成矩陣運算的線性加權(跟之前的版本是一樣的效果)
+        final_scores = np.exp(total_log_scores)  # 為了實現非線性的幾何聚合 (Non-linear Geometric Aggregation)
+        seen_names = set() # 用於追蹤已排入的店名
+
+        # 理由提取與結果封裝
+        sorted_indices = np.argsort(final_scores)[::-1]
+        
+        # 定義理由模板
+        reason_tags = ["語意最精準", "高分評價推薦", "人氣名店", "距離最近"]
+        
+        final_results = []
+        for idx in sorted_indices:
+            v_id = valid_ids[idx]
+            store_entry = db_map[v_id].copy()
+            name = store_entry.get("restaurant_name")
+
+            # 如果這家店名已經出現過了，就跳過 (因為目前的 idx 是由高分排到低分，先入者必為最高分)
+            if name in seen_names:
+                continue
                 
-                # 人氣分數 (對數歸一化)
-                reviews_count = store.get('user_ratings_total', 0)
-                pop_score = math.log1p(db_map[v_id].get('user_ratings_total', 0)) / max_reviews_log
+            # 找出這家店得分最高的維度索引
+            best_dim_idx = np.argmax(contribution_matrix[idx])
 
-                # 距離
-                dist_score = 0
-                if plan.get("distance_needed") and "distance" in store:
-                    # 從資料庫拿到的 dist_val 單位是「公尺」 (如 800, 1500)
-                    dist_val = store.get("distance", 0)
-                    
-                    # --- 關鍵修正：將公尺轉為公里 ---
-                    # 這樣 100m 會變成 0.1km -> 1/(1+0.1) = 0.90 分
-                    # 這樣 1000m 會變成 1.0km -> 1/(1+1.0) = 0.50 分
-                    dist_km = dist_val / 1000.0
-                    
-                    # 使用 1/(1+d) 公式，d 越小分數越高
-                    dist_score = 1 / (1 + dist_km)
+            store_entry["applied_strategy"] = sort_strategy
+            store_entry["ranking_reason"] = reason_tags[best_dim_idx]
+            store_entry["hybrid_score"] = round(float(final_scores[idx]), 4)
+            store_entry["semantic_similarity"] = round(matrix[idx][0], 4)
+            
+            store_entry["score_analysis"] = {
+                "sim": round(matrix[idx][0], 2),
+                "rating": round(matrix[idx][1], 2),
+                "pop": round(matrix[idx][2], 2),
+                "dist": round(matrix[idx][3], 2)
+            }
+            
+            final_results.append(store_entry)
+            seen_names.add(name) # 標記此店名已處理
 
-                # --- 2. 混合總分計算 ---
-                current_score = (
-                    (sim_score * weights["sim"]) + 
-                    (rating_score * weights["rating"]) + 
-                    (pop_score * weights["pop"]) + 
-                    (dist_score * weights["dist"])
-                )
-                current_score = round(current_score, 4)
+            # 達到要求的數量就停止，節省後續計算
+            if len(final_results) >= top_k:
+                break
 
-                # 如果這家店還沒進榜，或是這則評論算出的總分比之前的高，就更新它
-                if v_id not in best_stores or current_score > best_stores[v_id]["hybrid_score"]:
-                    # 從之前整理好的資料庫地圖（db_map）中抓出這家店的原始資料
-                    # 複製一份資料避免污染原始 db_results
-                    store_entry = db_map[v_id].copy()
-                    # 將剛剛計算出來的「混合權重分數」（包含相似度、星等、距離、人氣的總分）
-                    # 塞進這家店的資料欄位中
-                    store_entry["hybrid_score"] = current_score
-                    # 額外存下「語意相似度」，
-                    # 這對於後續除錯或顯示「推薦原因」很有幫助（代表這家店在內容上多接近使用者的要求）
-                    store_entry["semantic_similarity"] = round(sim_score, 4)
-                    # 份完美的資料存入 best_stores 字典中。如果原本已經有舊資料，
-                    # 這行會直接覆蓋（更新為更高分的版本）
-                    best_stores[v_id] = store_entry
-                
-                
+        logging.info(f"[Hybrid Rank][SID: {s_id}] 排序完成，已生成可解釋性理由。")
+        return final_results
 
-        logging.info(f"[Hybrid Rank] 最終比對成功數量: {match_count} / {len(vector_results)}")
-
-        # 把字典轉成List
-        # 用 .values() 把裡面所有的店家資料抓出來，轉成一個乾淨的 List
-        ranked_list = list(best_stores.values())
-        # 排列(由高到低)
-        # 根據hybrid_score總權重值來排
-        ranked_list.sort(key=lambda x: x["hybrid_score"], reverse=True)
-        # 切片取件（只要前三名）
-        # 即便資料庫搜尋出 100 幾家店,我們不希望一次塞給使用者看這麼多。
-        # 這行代碼會從排序好的名單,從第0個位置切到第top_k 個(設定3)
-        # 只拿走分數最高的那三家
-        final_results = ranked_list[:top_k]
-
-        # 做完完整的RAG查詢後,更新 info
-        info.update({
-            "status": "success",
-            "message": f"完成混合排序，篩選前 {top_k} 名",
-            "details": [{"id": r["id"], "score": r.get("hybrid_score")} for r in final_results]
-        })
-
-        return ranked_list[:top_k]
-    
     # 當不需要執行向量搜尋，或是向量搜尋失效沒找到結果時
     # 確保系統依然能回傳一個對使用者有意義的「前三名」清單
+    # 這裡要放TOPISIS的演算法邏輯
     def _apply_fallback_sorting(self, db_results, plan, top_k):
         res = db_results.copy() # 先複製一份，避免改到原始資料
         

@@ -2,6 +2,7 @@
 import json
 from app.utils.distance_utils import get_haversine_distance_sql # 匯入距離計算的SQL生成器
 import logging
+import copy
 
 class HybridSQLBuilder:
     def __init__(self):
@@ -88,10 +89,11 @@ class HybridSQLBuilder:
             "location_source": "none", # 新增：記錄來源 (user / default / none)
             "select_fields": [], # 預設一定查店家的id,name,address,rating欄位
             "sort_clauses": [],      # 存放 ORDER BY 的字串
+            "sort_conditions": json_input.get("sort_conditions", []),
             "query_params": {},      # 預留給參數化查詢的字典  
             "page": json_input.get("page", 1),           # 記錄當前頁碼
             "page_size": json_input.get("page_size", 3), # 記錄每頁顯示幾筆
-            "vector_needed": False,  # 旗標：是否需要去查向量資料庫
+            "vector_needed": False,  # 是否需要去查向量資料庫
             "vector_keywords": {},    # 若需要，要查哪些關鍵字
             "photos_needed": False, # 是否有photo需求
             "distance_needed": False,
@@ -145,7 +147,7 @@ class HybridSQLBuilder:
                 "restaurant_name": "p.name", # 強制回傳名稱
                 "address": "p.address",
                 "rating": "p.rating",
-                "reviews_count": "p.reviews_count"
+                "reviews_count": "p.user_ratings_total"
             }
             
             for key, db_col in base_fields.items():
@@ -212,52 +214,57 @@ class HybridSQLBuilder:
         return plan
     
 
-    # 遞迴掃描邏輯樹，看看有沒有向量欄位
+    # 遞迴掃描邏輯樹，提取向量關鍵字
     def _scan_for_vector_intent(self, node, plan, s_id):
-        
-        # 這是一個邏輯群組節點,包含 AND/OR 和 conditions 列表
         if not node: return
-        # 紀錄是哪一個sid
-        s_id = plan.get("s_id")
-        # 如果 有conditions節點代表就有下一層的節點
+        
+        # 確保 s_id 正確獲取（如果 plan 中有就優先使用）
+        s_id = plan.get("s_id", s_id)
+        
+        # 如果有 conditions 節點代表是有下一層的邏輯群組 (AND/OR)
         if "conditions" in node:
             for child in node["conditions"]:
-                # 遞迴檢查每一個子條件
                 self._scan_for_vector_intent(child, plan, s_id)
         else:
             # 這是葉節點 (Leaf Node)
             key = list(node.keys())[0]
-            val = node[key]["value"]
+            val = node[key].get("value")
             
-            # --- 強化後的處理邏輯 ---
-            # 1. 統一將所有 value 處理成字串或字串列表
+            if val is None: return
+
+            # 統一處理 value
             if isinstance(val, list):
                 if len(val) == 1:
-                    # 只有一個元素，直接脫殼變成純字串 (如 ["火鍋"] -> "火鍋")
                     processed_val = str(val[0])
                 else:
-                    # 有多個元素，合併成逗號分隔的字串，或保持列表 (建議轉字串對語意搜尋較友善)
-                    processed_val = ",".join([str(i) for i in val])
+                    # 改用空格分隔，對 Embedding 模型（如 OpenAI/Jina）的語意捕捉更友善
+                    processed_val = " ".join([str(i) for i in val])
             else:
-                # 本來就是單一值，轉成字串
                 processed_val = str(val)
             
-            # 哪些欄位即便 SQL 查過了，向量庫也要參與排序 (混血欄位)
-            hybrid_fields = {"food_type", "cuisine_type","flavor"}
+            # 定義哪些欄位需要進入向量排序 (包含 SQL 混血欄位與純語意欄位)
+            # 只要 key 出現在這些清單中，我們就收集它的 keywords
+            hybrid_fields = {"food_type", "cuisine_type", "flavor", "facility_tags", "service_tags"}
             
             if key in self.vector_fields or key in hybrid_fields:
-                plan["vector_needed"] = True  
-                # 存入處理後的純字串
                 plan["vector_keywords"][key] = processed_val 
-                logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意加強欄位: {key} = {processed_val}")
+                plan["vector_needed"] = True
+                logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意特徵: {key} -> {processed_val}")
 
     # 負責將邏輯樹轉成sql字串
     # 會接收關鍵參數 vector_result_ids:這是向量資料庫搜尋完後回傳的Place id列表
     # 就是已經跑完向量搜尋了現在要生成到MySQL查詢店家的基本訊息
-    def build_sql(self, plan, vector_result_ids=None):
+    def build_sql(self, plan, vector_result_ids=None, is_fallback=False):
         s_id = plan.get("s_id")
         logging.info(f"[SQL Builder][SID: {s_id}] 開始建構主查詢 SQL")
-        
+
+        logic_tree = copy.deepcopy(plan.get("raw_logic_tree", {}))
+
+        # 如果進入降階模式，執行「條件脫殼」
+        if is_fallback:
+            logging.info(f"[SQL Builder][SID: {s_id}] 偵測到 Fallback 模式，開始放寬 SQL 過濾條件")
+            logic_tree = self._strip_strict_conditions(logic_tree)
+
         # 1. 初始化分頁變數
         page = plan.get("page", 1)
         page_size = plan.get("page_size", 3)
@@ -269,7 +276,7 @@ class HybridSQLBuilder:
 
         # 3. 遞迴生成 WHERE 子句
         # 產生的參數會存入 self.query_params，計數器會增加
-        where_sql = self._recursive_parse(plan["raw_logic_tree"], s_id)
+        where_sql = self._recursive_parse(logic_tree, s_id)
 
         # 將產生的中間結果存回 plan 供除錯與 diagnostics 使用
         plan["generated_where_clause"] = where_sql
@@ -302,22 +309,58 @@ class HybridSQLBuilder:
         # 必須依據 ID 分組以支援聚合欄位
         sql += " GROUP BY p.id "
 
-        # 有無向量需求的排序處理方式
-        if not plan.get("deferred_sorting"):
-            # A. 正常模式：由資料庫排序並分頁
+
+        # 判斷是否需要擴大取樣：檢查是否開啟了延遲排序旗標
+        is_deferred = plan.get("deferred_sorting", False)
+
+        if not is_deferred:
+            # A. 正常 SQL 模式：由資料庫精確分頁
             if plan.get("sort_clauses"):
                 sql += " ORDER BY " + ", ".join(plan["sort_clauses"])
-            
-            # 無論有無 sort_clauses，只要不延遲排序，都應該套用分頁
             sql += f" LIMIT {page_size} OFFSET {offset}"
-            logging.debug(f"[SQL Builder] 正常模式：套用資料庫分頁 LIMIT {page_size}")
+            logging.info(f"[SQL Builder] 正常分頁模式: LIMIT {page_size}")
         else:
-            # B. 延遲排序模式：為了讓向量搜尋有足夠樣本，我們不排序且擴大取樣
-            # 這裡不加 ORDER BY 是為了效能，且讓 VectorService 拿到所有過濾後的候選者
-            sql += " LIMIT 100" 
-            logging.debug(f"[SQL Builder][SID: {s_id}] 延遲排序模式：SQL 不帶排序，取候選名單")
+            # B. 向量模式：取消 SQL 排序，直接抓出 100 筆候選店家供向量重排
+            sql += " ORDER BY p.rating DESC, p.user_ratings_total DESC "
+            sql += " LIMIT 150" 
+            logging.info(f"[SQL Builder] 語意重排模式: 擴大取樣 150 筆優質候選店家")
             
         return sql, self.query_params
+            
+
+    def _strip_strict_conditions(self, node):
+        """遞迴移除嚴格標籤 (如：冷氣、設施等)，保留核心類別"""
+        if not node:
+            return node
+        
+        # 處理邏輯群組 (AND/OR)
+        if "conditions" in node:
+            # 定義降階時要「犧牲」的欄位
+            # 建議保留 food_type 和 cuisine_type，除非你連類別都要放寬
+            # 把 facility_keys (內用、冷氣等) 拿掉
+            strict_keys = self.facility_keys | {"service_tags", "facility_tags"}
+            
+            new_conditions = []
+            for child in node["conditions"]:
+                # 取得葉節點的 Key
+                child_key = list(child.keys())[0] if "conditions" not in child else None
+                
+                if child_key and child_key in strict_keys:
+                    logging.info(f"[SQL Builder] Fallback：已移除嚴格條件 '{child_key}'")
+                    continue
+                
+                # 遞迴處理子節點
+                if "conditions" in child:
+                    processed_child = self._strip_strict_conditions(child)
+                    if processed_child and len(processed_child.get("conditions", [])) > 0:
+                        new_conditions.append(processed_child)
+                else:
+                    new_conditions.append(child)
+            
+            node["conditions"] = new_conditions
+            return node
+            
+        return node
 
     # 將巢狀JSON邏輯樹轉平為SQL WHERE字串
     def _recursive_parse(self, node, s_id):
@@ -344,7 +387,7 @@ class HybridSQLBuilder:
             if not child_sqls: 
                 logging.debug(f"[SQL Builder Debug] 群組 {operator} 無任何有效子條件")
                 return None
-            # 優化：如果群組內只有一個有效條件，就不需要額外包覆括號與運算子
+            # 如果群組內只有一個有效條件，就不需要額外包覆括號與運算子
             if len(child_sqls) == 1: 
                 return child_sqls[0]
             # 使用目前的運算子 (AND/OR) 串接所有子片段，並用括號封裝以確保運算優先權正確
@@ -362,7 +405,7 @@ class HybridSQLBuilder:
         cmp = node_data.get("cmp", "=").upper()
 
         logging.info(f"[SQL Builder][SID: {s_id}] ===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp}")
-        # --- [關鍵修正：統一脫殼] ---
+
         # 只要 val 是只有一個元素的 list，不管 cmp 是什麼，先把它轉成純字串/數值
         # 這樣後續不論走 IN 還是 LIKE 邏輯，item 都會是乾淨的
         if isinstance(val, list) and len(val) == 1:
@@ -400,7 +443,7 @@ class HybridSQLBuilder:
             
             fields_to_force_like = ["food_type", "restaurant_type", "restaurant_name", "merchant_categories", "address"]
 
-            # 統一脫殼：確保 val 只要是單一元素的 list 就轉成純字串
+            # 確保 val 只要是單一元素的 list 就轉成純字串
             safe_val = val[0] if isinstance(val, list) and len(val) == 1 else val
 
             # 強制模糊比對欄位
@@ -443,7 +486,7 @@ class HybridSQLBuilder:
     
 
 
-    def build_count_sql(self, plan, vector_result_ids=None):
+    def build_count_sql(self, plan, vector_result_ids=None, is_fallback=False):
         """
         生成用於計算店家總筆數的 SQL
         """
@@ -474,3 +517,5 @@ class HybridSQLBuilder:
             sql += " WHERE " + " AND ".join(final_where)
             
         return sql, self.query_params
+    
+    

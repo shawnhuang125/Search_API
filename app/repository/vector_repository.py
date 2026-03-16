@@ -19,7 +19,7 @@ class VectorRepository:
     def __init__(self, host: str = None, port: int = None, use_mock: bool = False):
         self.gpu_limit = asyncio.Semaphore(10)
         self.use_mock = use_mock or (not HAS_VECTOR_LIB)
-        self.collection_name = "restaurants"
+        self.collection_name = Config.COLLECTION_NAME
         self.payload_ready = True
         self.client: Any = None
         self.model: Any = None
@@ -32,7 +32,6 @@ class VectorRepository:
             # 2. 這裡 Log 會顯示真正的連線目標，請檢查啟動時是不是顯示 192.168.1.112
             logging.info(f"[Repo] 初始化模式: REAL QDRANT (連線至 {target_host}:{target_port})")
             try:
-                # 3. 💡 關鍵修正：prefer_grpc=False
                 # 因為你說 6333 是正常的（儀表板可開），所以必須走 HTTP 協議
                 self.client = AsyncQdrantClient(
                     host=target_host, 
@@ -51,72 +50,6 @@ class VectorRepository:
                 logging.error(f"模型或連線載入失敗: {e}")
                 self.use_mock = True
 
-
-    #async def search_by_vector(self, keywords: str) -> List[VectorSearchResult] | None:
-    #   
-    #    logging.info(f"[Repo] 執行向量搜尋, 關鍵字: {keywords}")
-    #
-    #    if not self.payload_ready:
-    ##        logging.warning("[Repo] Payload 尚未就緒，回傳 None 以跳過 SQL ID 過濾")
-    ##        return None
-    #    
-    #   if not self.use_mock:
-    #       return await self._search_qdrant_logic(keywords)
-    #   
-    #    return self._search_mock_logic(keywords)
-
-    #async def _search_qdrant_logic(self, keywords: str) -> List[VectorSearchResult]:
-    #    results = []
-    #    
-    #    if self.client is None or self.model is None:
-    #        logging.error("[Repo] Qdrant client 或 Model 未正確初始化")
-    #        return []
-    ##
-    #    try:
-    #       # 修改 1: 加入 normalize_embeddings，這對 BGE 系列效果更好
-    #       # 如果顯存吃緊，可以考慮加入 batch_size=1
-    #        query_vector = self.model.encode(
-    #           keywords, 
-    #           normalize_embeddings=True 
-    #      ).tolist()
-    #
-           # 修改 2: 這裡建議把 limit 變成變數，方便未來調整
-    #        search_result = await self.client.search(
-    #            collection_name=self.collection_name,
-    #            query_vector=query_vector,
-    #            limit=10,  # 稍微放寬一點，讓後面的 RAG 有更多素材
-    #          with_payload=True
-    #       )
-    #
-    #       logging.info(f"[Qdrant] 搜尋完成，找到 {len(search_result)} 筆結果")
-    #
-    #       for point in search_result:
-    #            p = point.payload
-    #          if not p: continue
-    #           
-    #           # 這裡保留你原本的 DTO 轉換邏輯
-    #           dto = VectorSearchResult(
-    #                id=p.get("original_id"),
-    #               name=p.get("name", "Unknown"),
-    #                cuisine_type=p.get("cuisine_type", []),
-    #                food_type=p.get("food_type", []),
-    #                flavor=p.get("flavor", []),
-    #                # dish_name=p.get("dish_name", []),
-    #                # review_text=p.get("review_text", ""),
-    #               level=p.get("level", "unknown")
-    #           )
-    #            results.append(dto)
-    #       return results
-    #
-    #   except Exception as e:
-    #        logging.error(f"[Repo] Qdrant 搜尋發生錯誤: {e}")
-    #          return []
-    #def _search_mock_logic(self, keywords: str) -> List[VectorSearchResult]:
-    #    logging.info("[Repo] 觸發攔截邏輯：回傳功能未支援說明")
-    #    
-    #    # 回傳一筆特殊的 Mock 資料告知狀態
-    #    return []
-    
     # 向量搜尋功能(只針對rdbms過濾出來的店家ID列表去做向量運算)
     async def search_in_ids(self, query_str: str, rdbms_ids: List[Any]) -> List[VectorSearchResult]:
         # 前置處理
@@ -143,7 +76,7 @@ class VectorRepository:
                 collection_name=self.collection_name,
                 query=query_vector,
                 query_filter=search_filter,
-                limit=10,
+                limit=30,  # 從 10 改成 30
                 with_payload=True
             )
             results = response.points
