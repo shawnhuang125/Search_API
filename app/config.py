@@ -21,3 +21,7 @@ class Config:
 
     VECTOR_DB_HOST = os.environ.get('Vector_DB_HOST', 'localhost')
     VECTOR_DB_PORT = int(os.environ.get('Vector_DB_PORT', 6333))
+
+    SEARCH_ARCHITECTURE = os.getenv("SEARCH_ARCHITECTURE", "Default_Hybrid")
+    CURRENT_PLACE_COUNT = os.getenv("CURRENT_PLACE_COUNT", "0")
+    PERFORMANCE_LOG_PATH = os.getenv("PERFORMANCE_LOG_PATH", "performance_metrics.csv")

@@ -15,6 +15,7 @@ class VectorSearchResult:
     flavor: List[str] = field(default_factory=list)
     dish_name: List[str] = field(default_factory=list)
     review_text: str = ""
+    review_summary: str = ""
     metadata_quality: str = "normal"
     
     # 加上這行來接收 Qdrant 的相似度分數

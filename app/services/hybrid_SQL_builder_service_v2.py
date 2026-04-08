@@ -19,9 +19,9 @@ class HybridSQLBuilder:
             "opening_hours": "p.opening_hours",
             "user_ratings_total": "p.user_ratings_total",
             #"time": "p.opening_hours",             # 額外支援 time
-            "food_type": "pa.food_type",
+            #"food_type": "pa.food_type",
             "cuisine_type": "pa.cuisine_type",
-            "merchant_categories": "pa.merchant_categories",
+            "merchant_category": "pa.merchant_category",
             "facility_tags": "pa.facility_tags",
             "lat": "p.lat",
             "lng": "p.lng",
@@ -49,10 +49,9 @@ class HybridSQLBuilder:
             "address": "p.address", 
             "rating": "p.rating",
             "cuisine_type": "pa.cuisine_type",
-            "food_type": "pa.food_type",
-            "merchant_categories": "pa.merchant_categories",
-            "restaurant_type": "pa.merchant_categories", # 依照要求：對應到類別
-            "service_tags": "pa.facility_tags",    # 支援 logic_tree 傳入 service_tags
+            # "food_type": "pa.food_type",
+            "merchant_category": "pa.merchant_category",
+            "restaurant_type": "pa.merchant_category", # 依照要求：對應到類別
             
             # --- 設施與標籤映射 (中文 Key 由 AI 產出) ---
             "內用": "pa.has_dine_in",
@@ -147,7 +146,8 @@ class HybridSQLBuilder:
                 "restaurant_name": "p.name", # 強制回傳名稱
                 "address": "p.address",
                 "rating": "p.rating",
-                "reviews_count": "p.user_ratings_total"
+                "reviews_count": "p.user_ratings_total",
+                "facility_tags": "pa.facility_tags"
             }
             
             for key, db_col in base_fields.items():
@@ -218,36 +218,32 @@ class HybridSQLBuilder:
     def _scan_for_vector_intent(self, node, plan, s_id):
         if not node: return
         
-        # 確保 s_id 正確獲取（如果 plan 中有就優先使用）
-        s_id = plan.get("s_id", s_id)
-        
-        # 如果有 conditions 節點代表是有下一層的邏輯群組 (AND/OR)
         if "conditions" in node:
             for child in node["conditions"]:
                 self._scan_for_vector_intent(child, plan, s_id)
         else:
-            # 這是葉節點 (Leaf Node)
             key = list(node.keys())[0]
             val = node[key].get("value")
-            
             if val is None: return
 
-            # 統一處理 value
+            # 處理值，轉為字串
             if isinstance(val, list):
-                if len(val) == 1:
-                    processed_val = str(val[0])
-                else:
-                    # 改用空格分隔，對 Embedding 模型（如 OpenAI/Jina）的語意捕捉更友善
-                    processed_val = " ".join([str(i) for i in val])
+                processed_val = " ".join([str(i) for i in val])
             else:
                 processed_val = str(val)
             
-            # 定義哪些欄位需要進入向量排序 (包含 SQL 混血欄位與純語意欄位)
-            # 只要 key 出現在這些清單中，我們就收集它的 keywords
             hybrid_fields = {"food_type", "cuisine_type", "flavor", "facility_tags", "service_tags"}
             
             if key in self.vector_fields or key in hybrid_fields:
-                plan["vector_keywords"][key] = processed_val 
+                # --- 修改開始：改用 List 儲存以防覆蓋 ---
+                if key not in plan["vector_keywords"]:
+                    plan["vector_keywords"][key] = []
+                
+                # 如果該 key 本來不是 list (為了相容舊邏輯)，強轉成 list
+                if not isinstance(plan["vector_keywords"][key], list):
+                    plan["vector_keywords"][key] = [str(plan["vector_keywords"][key])]
+                
+                plan["vector_keywords"][key].append(processed_val)
                 plan["vector_needed"] = True
                 logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意特徵: {key} -> {processed_val}")
 
@@ -329,27 +325,30 @@ class HybridSQLBuilder:
             
 
     def _strip_strict_conditions(self, node):
-        """遞迴移除嚴格標籤 (如：冷氣、設施等)，保留核心類別"""
+        """
+        因為設施與類型已全數移往向量搜尋，
+        SQL Builder 的放寬邏輯僅針對 SQL 實體欄位（如評分、區域）。
+        """
         if not node:
             return node
         
         # 處理邏輯群組 (AND/OR)
         if "conditions" in node:
-            # 定義降階時要「犧牲」的欄位
-            # 建議保留 food_type 和 cuisine_type，除非你連類別都要放寬
-            # 把 facility_keys (內用、冷氣等) 拿掉
-            strict_keys = self.facility_keys | {"service_tags", "facility_tags"}
+            # 定義降階時要「犧牲」的 SQL 實體欄位
+            # 這裡不再包含 '冷氣'、'內用' 等，因為它們在 SQL 階段會被 _recursive_parse 攔截
+            sql_strict_keys = {"rating", "user_ratings_total", "address"}
             
             new_conditions = []
             for child in node["conditions"]:
                 # 取得葉節點的 Key
                 child_key = list(child.keys())[0] if "conditions" not in child else None
                 
-                if child_key and child_key in strict_keys:
-                    logging.info(f"[SQL Builder] Fallback：已移除嚴格條件 '{child_key}'")
+                # 如果是 SQL 實體欄位且需要放寬
+                if child_key and child_key in sql_strict_keys:
+                    logging.info(f"[SQL Builder] Fallback：放寬 SQL 實體過濾條件 '{child_key}'")
                     continue
                 
-                # 遞迴處理子節點
+                # 遞迴處理
                 if "conditions" in child:
                     processed_child = self._strip_strict_conditions(child)
                     if processed_child and len(processed_child.get("conditions", [])) > 0:
@@ -366,6 +365,15 @@ class HybridSQLBuilder:
     def _recursive_parse(self, node, s_id):
         if not node: 
             logging.debug("[SQL Builder Debug] 節點為空，跳過解析")
+            return None
+        
+        key = list(node.keys())[0]
+        vector_only_fields = {
+            "service_tags", "food_type", "cuisine_type",
+            "內用", "冷氣", "外帶", "吃到飽", "特約停車場", "行動支付", "現金支付", "信用卡"
+        }
+        if key in vector_only_fields:
+            logging.info(f"[SQL Builder][SID: {s_id}] 攔截向量欄位 '{key}'，不生成 SQL")
             return None
 
         # 處理邏輯運算子節點 (AND/OR)
@@ -399,7 +407,7 @@ class HybridSQLBuilder:
 
         # 2. 處理單一條件 (葉節點)
         # 取得當前條件的 Key (例如: "外帶" 或 "food_type")
-        key = list(node.keys())[0]
+        
         node_data = node[key]
         val = node_data.get("value")
         cmp = node_data.get("cmp", "=").upper()
@@ -441,7 +449,7 @@ class HybridSQLBuilder:
             db_col = self.sql_where_mapping[key]
             # 注意：這裡先不要宣告 p_name，交給各分支處理 counter
             
-            fields_to_force_like = ["food_type", "restaurant_type", "restaurant_name", "merchant_categories", "address"]
+            fields_to_force_like = [ "restaurant_type", "restaurant_name", "merchant_category", "address"]
 
             # 確保 val 只要是單一元素的 list 就轉成純字串
             safe_val = val[0] if isinstance(val, list) and len(val) == 1 else val

@@ -40,3 +40,10 @@ m3_food_finetuned/
 formatted_data_*.json
 # 移除qdrant的連線測試檔案
 test_qdrant.py
+
+# --- LLM / Ollama 模型相關 (防止手動下載的模型被上傳) ---
+*.gguf
+*.bin
+*.onnx
+models/
+ollama_models/

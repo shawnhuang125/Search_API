@@ -23,3 +23,7 @@ urllib3>=1.26.14,<3
 
 pytest
 cryptography
+
+ollama 
+tqdm
+opencc-python-reimplemented
