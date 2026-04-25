@@ -1,6 +1,8 @@
 # app/services/hybrid_SQL_builder_service_v2.py
 import json
+import time
 from app.utils.distance_utils import get_haversine_distance_sql # 匯入距離計算的SQL生成器
+from app.utils.performance_tracker import log_function_timing    # 函式層級耗時記錄器
 import logging
 import copy
 
@@ -74,6 +76,9 @@ class HybridSQLBuilder:
     # 回傳一個字典,包含SQL所需的結構以及向量搜尋的需求
     def analyze_intent(self, json_input):
         s_id = json_input.get("s_id")
+        # 記錄函式起始時間，用於計算整體意圖解析耗時
+        # 為什麼放在 s_id 取得之後：s_id 是 logging 必要參數，取得後才有辦法完整記錄這筆計時
+        t0_analyze = time.perf_counter()
         logging.info("[SQL Builder] 開始解析使用者意圖 (analyze_intent)")
 
         s_id = json_input.get("s_id")
@@ -147,7 +152,9 @@ class HybridSQLBuilder:
                 "address": "p.address",
                 "rating": "p.rating",
                 "reviews_count": "p.user_ratings_total",
-                "facility_tags": "pa.facility_tags"
+                "facility_tags": "pa.facility_tags",
+                "lat": "p.lat",  # 確保後端計算距離永遠有資料
+                "lng": "p.lng"   # 確保後端計算距離永遠有資料
             }
             
             for key, db_col in base_fields.items():
@@ -203,6 +210,7 @@ class HybridSQLBuilder:
         plan["raw_logic_tree"] = json_input.get("logic_tree", {})
 
         # 如果有向量需求,那排序就要放到向量斯尋完畢之後處理
+
         if plan["vector_needed"]:
             plan["deferred_sorting"] = True
             plan["order_by_distance"] = any(s.get("field") == "distance" for s in json_input.get("sort_conditions", []))
@@ -210,6 +218,9 @@ class HybridSQLBuilder:
         else:
             plan["deferred_sorting"] = False
             plan["order_by_distance"] = False
+
+        # 記錄 analyze_intent 函式總耗時至 CSV
+        log_function_timing("analyze_intent", s_id, time.perf_counter() - t0_analyze)
 
         return plan
     
@@ -247,11 +258,19 @@ class HybridSQLBuilder:
                 plan["vector_needed"] = True
                 logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意特徵: {key} -> {processed_val}")
 
+
+
     # 負責將邏輯樹轉成sql字串
     # 會接收關鍵參數 vector_result_ids:這是向量資料庫搜尋完後回傳的Place id列表
     # 就是已經跑完向量搜尋了現在要生成到MySQL查詢店家的基本訊息
-    def build_sql(self, plan, vector_result_ids=None, is_fallback=False):
+    # 移除參數 vector_result_ids：
+    # 此參數從未在函式體內被使用，原設計意圖是將向量搜尋結果的 ID 傳入以限制 SQL 範圍，
+    # 但實際上 ID 過濾邏輯已移至 VectorService，此處不再需要
+    def build_sql(self, plan, is_fallback=False):
         s_id = plan.get("s_id")
+        # 記錄 SQL 建構起始時間，涵蓋 _strip_strict_conditions 與 _recursive_parse 的整體耗時
+        # 為什麼不對遞迴子函式個別計時：子函式會被呼叫多次，個別計時會產生大量噪音列，不利分析
+        t0_build_sql = time.perf_counter()
         logging.info(f"[SQL Builder][SID: {s_id}] 開始建構主查詢 SQL")
 
         logic_tree = copy.deepcopy(plan.get("raw_logic_tree", {}))
@@ -273,6 +292,8 @@ class HybridSQLBuilder:
         # 3. 遞迴生成 WHERE 子句
         # 產生的參數會存入 self.query_params，計數器會增加
         where_sql = self._recursive_parse(logic_tree, s_id)
+        plan["_cached_where"] = where_sql # 暫存起來
+        plan["_cached_params"] = copy.deepcopy(self.query_params)
 
         # 將產生的中間結果存回 plan 供除錯與 diagnostics 使用
         plan["generated_where_clause"] = where_sql
@@ -282,17 +303,13 @@ class HybridSQLBuilder:
         if where_sql:
             final_where.append(where_sql)
 
-        # 計算距離公式注入
         if plan.get("distance_needed") and plan.get("user_location"):
             u_lat = plan["user_location"]["lat"]
             u_lng = plan["user_location"]["lng"]
             dist_sql = get_haversine_distance_sql(u_lat, u_lng)
-            
-            # 防止重複加入 distance 欄位
             dist_alias = f"{dist_sql} AS distance"
             if not any("AS distance" in f for f in plan["select_fields"]):
                 plan["select_fields"].append(dist_alias)
-                logging.debug("[SQL Builder] 已注入 Haversine 距離計算公式")
 
         # 6. 組裝最終 SQL
         sql = "SELECT " + ", ".join(plan["select_fields"])
@@ -318,9 +335,12 @@ class HybridSQLBuilder:
         else:
             # B. 向量模式：取消 SQL 排序，直接抓出 100 筆候選店家供向量重排
             sql += " ORDER BY p.rating DESC, p.user_ratings_total DESC "
-            sql += " LIMIT 150" 
+            sql += "LIMIT 150"
             logging.info(f"[SQL Builder] 語意重排模式: 擴大取樣 150 筆優質候選店家")
-            
+
+        # 記錄 build_sql 函式總耗時至 CSV
+        log_function_timing("build_sql", s_id, time.perf_counter() - t0_build_sql)
+
         return sql, self.query_params
             
 
@@ -448,17 +468,33 @@ class HybridSQLBuilder:
         if key in self.sql_where_mapping:
             db_col = self.sql_where_mapping[key]
             # 注意：這裡先不要宣告 p_name，交給各分支處理 counter
+
+            # 定義哪些欄位要走 Full-Text 搜尋 (建議 address 和 restaurant_name)
+            fulltext_fields = ["address", "restaurant_name"]
+            fields_to_force_like = ["restaurant_type", "merchant_category"]
             
-            fields_to_force_like = [ "restaurant_type", "restaurant_name", "merchant_category", "address"]
 
             # 確保 val 只要是單一元素的 list 就轉成純字串
             safe_val = val[0] if isinstance(val, list) and len(val) == 1 else val
 
+            # 1. 新增：處理 Full-Text 搜尋
+            if key in fulltext_fields:
+                p_name = f"p{self.param_counter}"
+                self.query_params[p_name] = safe_val  # 不需要加 % 號
+                self.param_counter += 1
+                
+                # 使用 MATCH AGAINST 語法
+                # IN NATURAL LANGUAGE MODE 是最直覺的搜尋方式
+                sql_fragment = f"MATCH({db_col}) AGAINST(%({p_name})s IN NATURAL LANGUAGE MODE)"
+                
+                logging.info(f"[SQL Builder] 生成 Full-Text SQL: {sql_fragment} | 關鍵字: {safe_val}")
+                return sql_fragment
+
             # 強制模糊比對欄位
             # 只要在名單內，不管 AI 給什麼 cmp，一律強制轉 LIKE
-            if key in fields_to_force_like or cmp == "LIKE":
+            elif key in fields_to_force_like or cmp == "LIKE":
                 p_name = f"p{self.param_counter}"
-                param_value = f"%{safe_val}%" # 此時 safe_val 已經是 '崑大路'
+                param_value = f"{safe_val}%" # 此時 safe_val 已經是 '崑大路'
                 self.query_params[p_name] = param_value
                 self.param_counter += 1
                 sql_fragment = f"{db_col} LIKE %({p_name})s"
@@ -494,22 +530,35 @@ class HybridSQLBuilder:
     
 
 
-    def build_count_sql(self, plan, vector_result_ids=None, is_fallback=False):
+    # 移除參數 is_fallback：
+    # 此參數從未在函式體內被使用，導致 Fallback 輪的 Count SQL 與主查詢條件不一致（Count 仍用嚴格條件）
+    # 若未來需要修正此邏輯不一致，應在此處呼叫 _strip_strict_conditions 套用放寬條件後再計算總數
+    def build_count_sql(self, plan, vector_result_ids=None):
         """
         生成用於計算店家總筆數的 SQL
         """
         s_id = plan.get("s_id")
         logging.info(f"[SQL Builder][SID: {s_id}] 開始建構總數統計 SQL (Count Query)")
         # 確保 Count 查詢從 p0 開始，且不殘留舊參數 ---
-        self.param_counter = 0 
-        self.query_params = {}
+
+        # 記錄 count SQL 建構起始時間，用於觀察 Count 查詢的 SQL 組裝是否有效率瓶頸
+        # 為什麼單獨計時：Count SQL 與主查詢 SQL 的條件邏輯相同，但通常更快；若兩者耗時差異過大，代表 recursive_parse 有異常
+        t0_count_sql = time.perf_counter()
+
+        where_sql = plan.get("_cached_where") 
+        self.query_params = plan.get("_cached_params", {})        
+
 
         sql = "SELECT COUNT(DISTINCT p.id) AS total FROM all_places p "
-        sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
+        # 實驗性測試：拿掉 JOIN
+        # sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id"
+
+        # 如果 WHERE 子句中有提到 pa. (來自屬性表)，就必須 JOIN，否則 SQL 會報錯
+        if where_sql and "pa." in where_sql:
+            sql += " LEFT JOIN Place_Attributes as pa ON p.id = pa.place_id "
         
         final_where = []
-        # 重新呼叫遞迴解析，這會生成全新的、乾淨的 p0, p1...
-        where_sql = self._recursive_parse(plan["raw_logic_tree"], s_id)
+
         if where_sql:
             final_where.append(where_sql)
             
@@ -523,7 +572,10 @@ class HybridSQLBuilder:
 
         if final_where:
             sql += " WHERE " + " AND ".join(final_where)
-            
+
+        # 記錄 build_count_sql 函式總耗時至 CSV
+        log_function_timing("build_count_sql", s_id, time.perf_counter() - t0_count_sql)
+
         return sql, self.query_params
     
     

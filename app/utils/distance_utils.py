@@ -29,7 +29,7 @@ def get_haversine_distance_sql(user_lat,user_lng, lat_col="p.lat", lng_col="p.ln
         ({R_METERS} * acos(
             cos(radians({lat})) * cos(radians({lat_col})) * cos(radians({lng_col}) - radians({lng})) + 
             sin(radians({lat})) * sin(radians({lat_col}))
-        )) / 1000.0
+        ))
     )
     """
     return sql.strip()

@@ -72,17 +72,29 @@ pip install -r requirements.txt
 - 環境變數設定 (.env) 請在根目錄建立 .env 檔案：
 
 ```
-Ini, TOML
+# Relarional Database Configuration 
+DB_HOST=YourRDBHostIP
+DB_PORT=YourRDBHostPort
+DB_USER=YourRDBHostUser
+DB_PASSWORD=YourRDBHostUserPassword
+DB_NAME=YourRDBHostDatabase
 
-FLASK_APP=run.py
-FLASK_ENV=development
+# Vecotr Database Configuration
+VECTOR_DB_HOST = YourVDBHostDatabase
+Vector_DB_PORT=YourVDBHostPort
+COLLECTION_NAME = YourVDBHostCollection
+# Photo Url show on frontend
+IMAGES_URL = YourPhotoHostIP&Path
 
-# 資料庫設定 (若使用 Mock 模式可忽略)
-DB_HOST=localhost
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=yourpassword
-DB_NAME=food_db
+# Performance Monitoring and Test Settings
+# The Search Architecture (Example: Hybrid_V2_Original, Hybrid_V2_Optimized)
+SEARCH_ARCHITECTURE=Hybrid_V2_Full_Flow
+
+# The Total Store Account of Relational Database (This is the Test Scale.)
+CURRENT_PLACE_COUNT=
+
+# The Performance Logger & The Store Path of CSV
+PERFORMANCE_LOG_PATH=logs/performance_metrics.csv
 ```
 
 3. 啟動伺服器 (Run)

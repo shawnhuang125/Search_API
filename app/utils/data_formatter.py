@@ -94,30 +94,22 @@ def format_response_data(results, plan):
 # 距離資料的格式化
 def format_distance_display(results):
     """
-    將距離欄位 (公尺整數) 格式化為易讀字串
-    規則:
-    - 大於等於 1000m -> 轉為 km (保留3位小數)
-    - 小於 1000m -> 維持 m (整數)
+    距離資料的格式化
     """
     for row in results:
-        # 檢查是否有 distance 欄位 (因為有些查詢可能沒算距離)
         if 'distance' in row and row['distance'] is not None:
             try:
-                dist_m = float(row['distance']) # 確保是數字
+                dist_m = float(row['distance'])
                 
                 if dist_m >= 1000:
-                    # 超過 1 公里：除以 1000，保留 3 位小數，單位 km
-                    # 例如: 1254 -> "1.254 km"
-                    row['distance'] = f"{dist_m / 1000:.3f} km"
+                    # 例如 2500 公尺 -> "2.500 km"
+                    row['distance'] = f"{dist_m / 1000:.2f} km" # 建議改兩位小數比較清爽
                 else:
-                    # 小於 1 公里：取整數，單位 m
-                    # 例如: 300 -> "300 m"
+                    # 例如 300 公尺 -> "300 m"
                     row['distance'] = f"{int(dist_m)} m"
                     
             except (ValueError, TypeError):
-                # 防呆：如果資料庫回傳怪怪的數值，就維持原樣
                 pass
-                
     return results
 
 def check_search_status(db_results, plan, total_count=0):

@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional,Tuple
 from app.repository.vector_repository import VectorRepository
 from sentence_transformers import SentenceTransformer
 from app.models.search_dto import VectorSearchResult
+import numpy as np
 import math
 import logging
 import numpy as np
@@ -10,35 +11,93 @@ import math
 import time
 import json
 
+    # 本專案之向量搜尋的業務邏輯設計嚴格遵循"宣告式程式設計"
+    # 為了提升維護效率與閱讀性所以將業務邏輯與資料庫搜尋之I/O運算分層設計
 
 class RankSettings:
+
+    # -------- Facility_tags邏輯配置 --------
+
+    # 為了要提高基礎措施的精準度而定義的映射表,用於Qdrant Filtering搜尋
+    TAG_MAPPING = {
+        # 停車相關的映射詞彙
+        "有停車場": "特約停車場",   "停車場": "特約停車場",     "停車位": "特約停車場",
+        "停車": "特約停車場",       "有車位": "特約停車場",     "車位": "特約停車場",
+        "免費停車": "特約停車場",   "特約停車": "特約停車場",   "好停車": "特約停車場",
+        "附停車場": "特約停車場",   "附車位": "特約停車場",     "停車資訊": "特約停車場",
+        "停車方便": "特約停車場",   "路邊停車": "特約停車場",   "附近停車": "特約停車場",
+        # 冷氣相關的映射詞彙
+        "冷氣": "冷氣", "有冷氣": "冷氣", "冷氣開放": "冷氣", "空調": "冷氣",
+        # 外帶相關的映射詞彙
+        "外帶": "外帶", "可外帶": "外帶", "提供外帶": "外帶",
+        # 內用相關的映射詞彙
+        "內用": "內用", "可內用": "內用", "提供內用": "內用",
+        # 支付相關的映射詞彙
+        "現金支付": "現金支付", "收現金": "現金支付", "只收現金": "現金支付"
+    }
+
+
+    # -------- 混合排序權重邏輯配置 --------
+
+
+    # 被排序的所有店家指標: 
+    # distance: 距離, rating: 評論星等, popularity: 知名度(總評論數), similarity: 語意相似度
     ALLOWED_FIELDS = {"distance", "rating", "popularity", "similarity"}
 
-    # 情況 A：完全沒條件時的「強偏好」
+    # [情況 A] 當使用者「完全沒有指定」排序條件時（例如只說：我想吃拉麵）
+    # 使用「語意優先」的強偏好規則，目的是讓搜尋結果最符合用戶描述的直覺。
     DEFAULT_WEIGHTS = {
-        "similarity": 0.80, "rating": 0.15, "popularity": 0.05, "distance": 0.0
+        # 語意相似度 (80%): 最核心權重。確保排在前面的店「內容」最符合搜尋詞。
+        "similarity": 0.80, 
+        # 評論星等 (15%): 輔助權重。在內容相似的情況下，優先推薦「好吃的店」。
+        "rating": 0.15, 
+        # 知名度 (5%): 微弱影響力。作為加分項，讓知名名店能稍微靠前。
+        "popularity": 0.05, 
+        # 距離 (0%): 預設不影響排名。除非用戶主動要求距離排序，否則以「好吃且準確」為主。
+        "distance": 0.0
     }
 
-    # 情況 B：有條件時的「弱偏好基底」
+    # [情況 B] 當使用者有明確指定排序條件時（如：評價最高、距離最近）
+    # DYNAMIC_BASE 作為「弱偏好基底」，其目的是在尊重使用者「排序要求」的同時，
+    # 偷偷保留一點「語意相似度」的影響力，防止出現雖然排序正確，但店名/內容完全不相關的結果。
     DYNAMIC_BASE = {
-        "similarity": 0.3, "rating": 0.05, "popularity": 0.0, "distance": 0.0
+        # 即使要排距離，也要確保店家跟「搜尋關鍵字」有 30% 的相關度保底
+        "similarity": 0.3, 
+        # 給予評分 5% 的微弱權重，作為同分時的破局點 (Tie-breaker)
+        "rating": 0.05, 
+        "popularity": 0.0, 
+        "distance": 0.0
     }
 
+    # PRIMARY_BONUS：主激勵權重 (第一個排序條件)
+    # 當使用者指定第一個排序欄位時（例如 sort_conditions[0] 是評分），
+    # 該指標會獲得 0.4 的權重加乘，使其成為影響排名的核心因素。
     PRIMARY_BONUS = 0.4
+
+    # SECONDARY_BONUS：次激勵權重 (第二個排序條件)
+    # 若使用者有提供第二個排序條件，該指標獲得 0.2 的權重，
+    # 輔助主條件進行排序，提供更細膩的排名層次。
     SECONDARY_BONUS = 0.2
 
 
 class VectorService:
     def __init__(self):
-        # 初始化倉管員
+        # 1. 載入模型 (全應用程式唯一載入點)
+        logging.info("正在載入 BGE-M3 嵌入模型...")
+        self.model = SentenceTransformer('./m3_food_finetuned')
+        self.model.to('cuda') 
+        logging.info("模型載入完成")
+
+        # 2. 初始化 Repo (此時 Repo 的 __init__ 已經不會載入模型了)
         self.repo = VectorRepository()
+
+
     # 檢查向量需求 - 向量搜尋 - 權重計算與排序
     async def search_and_rank(
-        self, 
-        db_results: List[Dict[str, Any]], 
-        plan: Dict[str, Any], 
-        total_count: int = 0,
-        top_k: int = 3
+        self,
+        db_results: List[Dict[str, Any]],
+        plan: Dict[str, Any],
+        total_count: int = 0
     ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     
         # 獲取當次查詢的s_id用於紀錄詳細日誌
@@ -48,56 +107,66 @@ class VectorService:
 
         # 初始化結果容器與狀態指標
         info = {"status": "init", "message": "", "is_fallback": False}
-        soft_preferences = []       # 軟性語意標籤
-        semantic_parts = []         # 用於構建 Embedding Query 的短句列表
+        soft_preferences = []       # 用於動態門檻計算的參考
+        semantic_parts = []         # 構建向量搜尋用的字串
+        facility_tags = []          # 準備送往 Qdrant Filtering 的硬性標籤
 
-        # 定義口語到標準標籤的映射
-        TAG_MAPPING = {
-            "有停車場": "特約停車場",  
-            "冷氣": "冷氣",
-            "外帶": "外帶",
-            "內用": "內用"
-        }
-
+        
 
         if isinstance(keywords, dict):
-            # 1. 獲取標籤（處理 List 或 String 避免覆蓋問題）
+            # 1. 獲取原始標籤並統一轉為 List
             raw_tags = keywords.get("service_tags", "")
-            tags_to_join = []
+            tag_list = []
             if isinstance(raw_tags, list):
-                tags_to_join = raw_tags
+                tag_list = raw_tags
             elif raw_tags:
-                tags_to_join = [raw_tags]
-            
-            if tags_to_join:
-                # 合併標籤，並將全形頓號轉為空格以利語意理解
-                tags_str = " ".join(tags_to_join).replace("、", " ")
+                tag_list = [raw_tags]
+
+            # --- 分流邏輯開始 ---
+            tags_for_semantic = []
+            for t in tag_list:
+                # A. 如果在映射表內，提取到 facility_tags 走 Qdrant Filtering。
+                # 這樣設計是因為facility_tags沒有走相似度搜索要走精確過濾,所以用宣告映射表的方式
+                # 處理能夠想到的查詢關鍵字情境。
+                if t in RankSettings.TAG_MAPPING:
+                    facility_tags.append(RankSettings.TAG_MAPPING[t])
+                else:
+                    # B. 不在映射表內的標籤（如：氣氛好），保留在語意搜尋字串中
+                    tags_for_semantic.append(t)
+                    soft_preferences.append(t) # 同步加入 soft_preferences 供門檻計算使用
+            # --- 分流邏輯結束 ---
+
+            # 如果有軟性描述，加入語意字串
+            if tags_for_semantic:
+                tags_str = " ".join(tags_for_semantic).replace("、", " ")
                 semantic_parts.append(f"希望能有這些特色：{tags_str}。")
 
             # 2. 定義語意查詢模板（只需定義一次）
-            # 優先級：菜系 > 食物 > 口味
             mapping_fields = [
                 ("cuisine_type", "菜系風格", "推薦{}風味的餐廳。"),
                 ("food_type", "主打美食", "我想找關於{}的店家。"),
                 ("flavor", "口味要求", "這家店的食物吃起來是{}口味的。")
             ]
 
-            # 3. 執行迴圈構建語意句子
+            # 3. 執行迴圈構建語意句子 (修正參數數量，對應 mapping_fields 的 3 個值)
             for field, prefix, template in mapping_fields:
                 val = keywords.get(field)
                 if val:
-                    # 如果 val 是來自 LLM 的複數節點 (List)，將其合併
+                    # 合併來自 LLM 的複數節點
                     val_str = " ".join(val) if isinstance(val, list) else str(val)
-                    # 這裡可以選擇要用 template 還是 prefix，建議 template 語意較強
+                    # 統一使用 template 產出自然語言句子
                     semantic_parts.append(template.format(val_str))
 
-            # 4. 處理軟性偏好
-            if soft_preferences:
-                soft_tags_str = " ".join(soft_preferences).replace("、", " ")
-                semantic_parts.append(f"環境具備{soft_tags_str}等特色。")
-
-        # 5. 組合最終查詢字串（這行要縮排回 function 層級，不要在 if keywords 裡面）
+        # 4. 組合最終查詢字串
         query_str = " ".join(semantic_parts) or "推薦優質的美食餐廳"
+
+        # 將 query_str 塞進 info 回傳給 Route 層紀錄
+        info = {
+            "status": "init", 
+            "message": "", 
+            "is_fallback": False,
+            "query_content": query_str  
+        }
             
         logging.info(f"[Vector Service] 模糊語意查詢: '{query_str}'")
 
@@ -122,16 +191,27 @@ class VectorService:
         rdbms_ids = [row.get("id") for row in db_results] 
 
         # 如果沒語意需求，也不需要硬性過濾標籤，就走純排序
-        is_pure_sorting = not semantic_parts 
-
-        if is_pure_sorting:
+        if not semantic_parts:
             logging.info(f"[Vector Service][SID: {s_id}] 無明確語意需求，進入 [純指標排序模式]")
-            # 模擬滿分向量結果，讓後續矩陣運算完全由 RDBMS 指標 (評分、距離) 主導
-            vector_results = [
-                VectorSearchResult(id=row.get("id"), score=1.0) 
-                for row in db_results
-            ]
+            logging.info(f"[Vector Service][SID: {s_id}] 走純排序搜尋通道")
+
+            # 純 ID 提取，此時取得的 vector_results 內部的 score 已經是 1.0
+            vector_results = await self.repo.get_dtos_by_ids(rdbms_ids)
+
+
+            # 以下採用防禦性編程 (Defensive Programming)
+            # 為了確保即使切換到不同的排序模式，系統的檢查流程依然能穩定運行，不會因為某些變數未定義而中斷
+            # 同時可以達到程式碼路徑的統一性與安全性的需求
+        
+
+            # 在純排序模式中，主動將「最佳分數」設定為 1.0 (滿分)，代表要告訴系統
+            # "這些候選店家已經過篩，且表現完美，絕對符合參與排序的資格"，確保後續邏輯不
+            # 會因為分數太低而直接被"門檻檢查"給濾除
             best_score = 1.0
+            # 為了"關閉門檻過濾器",意思是"不設定門檻"或"門檻無限低"。
+            # 主要是為了繞過系統的過濾機制。
+            # 這樣，無論後面的排序邏輯如何加權，這些資料都保證能順利通過這層檢查，
+            # 直接進入 _apply_hybrid_ranking 階段。
             CURRENT_THRESHOLD = 0.0
         else:
             # 只有在「有需求」時才真正呼叫向量資料庫
@@ -139,11 +219,25 @@ class VectorService:
             logging.info(f"[Vector Service][SID: {s_id}] 執行向量過濾搜尋 (SQL IDs 數量: {len(rdbms_ids)})")
             
             q_start = time.perf_counter()
-            vector_results = await self.repo.search_in_ids(
-                query_str, 
+
+
+            # 純語意搜尋版本(Pure Similarity)的向量資料庫搜尋
+            #vector_results = await self.repo.search_in_ids_pure_similarity(
+            #    query_str, 
+            #    rdbms_ids, 
+            #    base_amenities=None
+            #)
+
+            query_vector = self.model.encode(query_str, normalize_embeddings=True).tolist()
+            
+
+            # 混和搜尋版本(Filtering + Similarity)的向量資料庫搜尋
+            vector_results = await self.repo.search_in_ids_hybrid(
+                query_vector, # 傳入算好的向量
                 rdbms_ids, 
-                base_amenities=None
+                facility_tags=facility_tags
             )
+
             q_end = time.perf_counter()
             info["qdrant_time"] = q_end - q_start
     
@@ -172,7 +266,7 @@ class VectorService:
         logging.info(f"[Vector Service][SID: {s_id}] 進入混合排序階段，候選數: {len(vector_results)}")
         r_start = time.perf_counter()
         final_results = await self._apply_hybrid_ranking(
-            vector_results, db_results, top_k, plan, info, CURRENT_THRESHOLD
+            vector_results, db_results, plan, CURRENT_THRESHOLD
         )
         r_end = time.perf_counter()
         info["ranking_time"] = r_end - r_start
@@ -234,25 +328,68 @@ class VectorService:
         )
         
         return final_threshold
-    
+
+
+    def _compute_distances_with_numpy(self, user_location: dict, db_map: dict, vector_results: list):
+        """
+        使用 NumPy 向量化運算極速計算候選店家的距離，並直接更新進 db_map 中。
+        """
+        try:
+            u_lat = np.radians(float(user_location["lat"]))
+            u_lng = np.radians(float(user_location["lng"]))
+
+            # 篩選出同時存在於向量結果與資料庫結果中的店家 ID
+            valid_v_ids = [str(v.id) for v in vector_results if str(v.id) in db_map]
+            
+            if not valid_v_ids:
+                return
+
+            # 建立 N x 2 的座標矩陣 [lat, lng]
+            coords = np.array([
+                [np.radians(float(db_map[v_id]['lat'])), 
+                np.radians(float(db_map[v_id]['lng']))] 
+                for v_id in valid_v_ids
+            ])
+
+            # Haversine 向量化公式
+            dlat = coords[:, 0] - u_lat
+            dlng = coords[:, 1] - u_lng
+            
+            a = np.sin(dlat/2)**2 + np.cos(u_lat) * np.cos(coords[:, 0]) * np.sin(dlng/2)**2
+            c = 2 * np.arcsin(np.sqrt(a))
+            distances_m = 6371000 * c 
+
+            # 將計算結果塞回 db_map
+            for i, v_id in enumerate(valid_v_ids):
+                db_map[v_id]['distance'] = float(distances_m[i])
+                
+            logging.info(f"[Vector Service] NumPy 已完成 {len(valid_v_ids)} 筆店家的距離計算")
+            
+        except Exception as e:
+            logging.error(f"[Vector Service] NumPy 距離計算發生錯誤: {e}")
+
 
     # 根據向量查詢結果進行權重運算與排序
+    # 為什麼移除 top_k 截斷：現在由 Route 層搭配 Redis 分頁快取處理截斷，
+    # 此方法負責回傳所有通過語意門檻的店家，確保分頁能存取完整排序結果
     async def _apply_hybrid_ranking(
-        self, 
+        self,
         vector_results: List[VectorSearchResult],
-        db_results: List[Dict[str, Any]], 
-        top_k: int,
-        plan: Dict[str, Any], 
-        info: Dict[str, Any],      
-        semantic_threshold: float 
+        db_results: List[Dict[str, Any]],
+        plan: Dict[str, Any],
+        semantic_threshold: float
     ) -> List[Dict[str, Any]]:
         
         db_map = {str(row['id']): row for row in db_results}
-        vector_map = {str(v.id): v for v in vector_results}
+
         s_id = plan.get("s_id", "unknown")
+
+    
+        vector_map = {str(v.id): v for v in vector_results}
 
         # LLM 有時候會給一些垃圾標籤，這邊先擋掉以免後面崩潰
         sort_conditions = plan.get("sort_conditions", [])
+
         # Filter out trash tags
         valid_conditions = [
             cond.get("field") for cond in sort_conditions 
@@ -334,6 +471,7 @@ class VectorService:
         
         # 總分依然是橫向加總
         total_log_scores = np.sum(contribution_matrix, axis=1)
+        
         # 為了實現非線性的幾何聚合 (Non-linear Geometric Aggregation)
         # 沒有以下這一行其實只是換成矩陣運算的線性加權(跟之前的版本是一樣的效果)
         final_scores = np.exp(total_log_scores)  # 為了實現非線性的幾何聚合 (Non-linear Geometric Aggregation)
@@ -341,10 +479,6 @@ class VectorService:
 
         # 理由提取與結果封裝
         sorted_indices = np.argsort(final_scores)[::-1]
-        
-        # 定義理由模板
-        reason_tags = ["語意最精準", "高分評價推薦", "人氣名店", "距離最近"]
-        
         final_results = []
         for idx in sorted_indices:
             v_id = valid_ids[idx]
@@ -388,14 +522,35 @@ class VectorService:
             #for i, w in enumerate(weights_vec):
             #    if w == 0.0:
             #        masked_contribution[i] = -999.0 
+            # 1. 取得語意匹配等級
+            sim_val = matrix[idx][0]
+            if sim_val >= 0.60:
+                sim_text = "高度符合需求"
+            elif sim_val >= 0.45:
+                sim_text = "語意大致符合"
+            else:
+                sim_text = "部分特徵相關"
+
+            # 2. 找出除了「語意相似度(Index 0)」外，貢獻度最高的指標
+            # Index 0:語意, 1:評價, 2:人氣, 3:距離
+            other_reason_tags = ["", "高分評價推薦", "人氣名店", "距離最近"]
+            
             mask = (weights_vec == 0.0)
-            row_contribution = contribution_matrix[idx].copy()  ## 找出這家店得分最高的維度索引
-            row_contribution[mask] = -999.0  # 屏蔽掉沒權重的維度
-            best_dim_idx = np.argmax(row_contribution)
-                    
+            row_contribution = contribution_matrix[idx].copy()
+            row_contribution[0] = -999.0  # 強制排除相似度維度，因為它已經由 sim_text 代表
+            row_contribution[mask] = -999.0 
+            
+            best_other_dim = np.argmax(row_contribution)
+            
+            # 3. 組合最終理由
+            if row_contribution[best_other_dim] > -100:
+                final_reason = f"{sim_text}，且{other_reason_tags[best_other_dim]}"
+            else:
+                final_reason = sim_text
+
+            store_entry["ranking_reason"] = final_reason
 
             store_entry["applied_strategy"] = sort_strategy
-            store_entry["ranking_reason"] = reason_tags[best_dim_idx]
             store_entry["hybrid_score"] = round(float(final_scores[idx]), 4)
             store_entry["semantic_similarity"] = round(matrix[idx][0], 4)
             
@@ -407,11 +562,11 @@ class VectorService:
             }
             
             final_results.append(store_entry)
-            seen_names.add(name) # 標記此店名已處理
+            seen_names.add(name)  # 標記此店名已處理
 
-            # 達到要求的數量就停止，節省後續計算
-            if len(final_results) >= top_k:
-                break
+            # 為什麼移除 top_k break：
+            # 分頁需要完整的排序結果存入 Redis，由 Route 層的 SearchSessionCache 負責切頁。
+            # 不再在此截斷，確保所有通過門檻的店家都被保留。
 
         logging.info(f"[Hybrid Rank][SID: {s_id}] 排序完成，已生成可解釋性理由。")
         return final_results
@@ -420,7 +575,7 @@ class VectorService:
 if __name__ == "__main__":
     import asyncio
     
-    # 簡單配置一下 Logging，不然你看不到那些酷酷的輸出
+    # 簡單配置一下 Logging，不然看不到輸出
     logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     async def test_run():
@@ -455,8 +610,7 @@ if __name__ == "__main__":
         try:
             results, info = await service.search_and_rank(
                 db_results=mock_db_results,
-                plan=mock_plan,
-                top_k=3
+                plan=mock_plan
             )
 
             print("\n✅ [排序結果回傳]")
