@@ -28,5 +28,5 @@ COPY . /code
 # 開放指定Port 5004
 EXPOSE 5004
 
-# 啟動指令 (請確保 run.py 內部監聽 5004)
-CMD ["python", "run.py"]
+# 使用 ENTRYPOINT 執行啟動腳本
+ENTRYPOINT ["/code/entrypoint.sh"]

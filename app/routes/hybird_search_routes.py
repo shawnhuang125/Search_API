@@ -1,17 +1,13 @@
 
 # app/routes/hybrid_search_routes.py
 from fastapi import APIRouter, HTTPException, Body, Query,Request
-from app.repository.rdbms_repository import RdbmsRepository
-from app.repository.vector_repository import VectorRepository
-from app.services.hybrid_SQL_builder_service_v2 import HybridSQLBuilder
 from app.utils.performance_tracker import log_performance_to_csv
-from app.services.vector_service import VectorService
 from app.utils.data_formatter import format_response_data   # 格式化搜尋結果與補上照片
-from app.utils.search_session_cache import SearchSessionCache  # Redis 分頁快取管理員
 from app.config import Config
-import logging
-from app.utils.data_formatter import check_search_status, generate_diagnostics   # 產生除錯訊息
+from app.utils.app_logger import logger
+from app.utils.quality_checker import check_search_status
 from app.utils.quality_checker import evaluate_search_quality
+from app.utils.quality_checker import analyze_search_results
 import time
 
 
@@ -82,9 +78,14 @@ async def generate_query_and_search(
             # FastAPI 使用 raise HTTPException 來處理錯誤，這會自動轉換為 JSON 回傳給前端
             raise HTTPException(status_code=400, detail={"status": "fail", "message": "No data"})
         
-        logging.info(f"fetched data: {ai_to_api_data}")
+        logger.info(f"fetched data: {ai_to_api_data}")
 
         try:
+
+            all_ranked_results = []
+            first_page_results = []
+            quality_label = "no_data" # 預設狀態
+
             # 針對輸入的json進行分析意圖
             plan = builder.analyze_intent(ai_to_api_data)
 
@@ -96,7 +97,7 @@ async def generate_query_and_search(
             t_sql_start = time.perf_counter()
 
             final_sql, query_params = builder.build_sql(plan)
-            logging.info(f"[Search][SID: {s_id}] 執行 SQL 查詢")
+            logger.info(f"[Search][SID: {s_id}] 執行 SQL 查詢")
 
             db_results, _ = await rdbms_repo.execute_dynamic_query(final_sql, query_params, s_id)
 
@@ -111,7 +112,7 @@ async def generate_query_and_search(
             total_count = count_results[0]['total'] if count_results else 0
 
             if total_count == 0:
-                logging.warning(f"[Search][SID: {s_id}] SQL 查無資料，直接回傳")
+                logger.warning(f"[Search][SID: {s_id}] SQL 查無資料，直接回傳")
                 search_status = check_search_status([], plan, total_count=0)
                 quality_label, is_fallback, ai_hint = evaluate_search_quality(
                     [],
@@ -134,7 +135,7 @@ async def generate_query_and_search(
 
             rdb_info["total_count"] = total_count
             rdb_info["status"] = "exact_one_match" if total_count == 1 else "success"
-            logging.info(f"[Search][SID: {s_id}] SQL 命中 {total_count} 筆")
+            logger.info(f"[Search][SID: {s_id}] SQL 命中 {total_count} 筆")
 
 
             # --- 執行搜尋與權重排序 ---
@@ -156,33 +157,46 @@ async def generate_query_and_search(
             # 過渡耗時 = (Vector 總耗時) - (Qdrant 淨耗時) - (指標排序淨耗時)
             transition_duration = (t_vector_done - t_sql_done) - qdrant_duration - ranking_duration
 
-            # --- 格式化全量結果（照片、標籤美化等）---
-            # 為什麼在存入 Redis 前做格式化：
-            # 確保快取中的資料已是前端可直接使用的格式，翻頁時不需要再次處理
+            # --- 1. 格式化結果 ---
             all_ranked_results = format_response_data(all_ranked_results, plan)
 
+            # --- 2. 執行分析門面 (搬移到這裡！) ---
+            # 必須先執行這一步，才會產生 quality_label, is_fallback, ai_hint
+            search_status, quality_label, is_fallback, ai_hint = analyze_search_results(
+                all_ranked_results, 
+                plan, 
+                total_count, 
+                vector_search_info, 
+                rdb_info
+            )
+
+
+            session_data = {
+                "results": all_ranked_results,
+                "meta_analysis": {
+                    "status": quality_label,
+                    "is_fallback": is_fallback,
+                    "ai_behavior_hint": ai_hint,
+                    "search_status": search_status,
+                    "vector_search_info": vector_search_info
+                }
+            }
+
             # --- 存入 Redis 分頁快取 ---
-            # 為什麼用 s_id 作為 search_ssid：
-            # s_id 是此次搜尋的唯一識別碼，由 AI 端傳入，前端持有，
-            # 直接複用可避免額外維護一個 session_id 映射表
-            search_ssid = plan.get("s_id")
-            await session_cache.save(search_ssid, all_ranked_results)
-
-            # --- 取出第 1 頁資料給本次請求的回應 ---
-            first_page_results, pagination_meta = await session_cache.get_page(
-                search_ssid, page=1, page_size=Config.PAGE_SIZE
+            # ── 【v3.0 進階版：獨立生成 6 碼隨機交易 SSID】 ──────────────────
+            # 改動動機：
+            #   1. 隱私防護：s_id 通常包含用戶識別或長字串，直接暴露在前端 URL 翻頁參數中有風險。
+            #   2. 資源優化：6 碼短 ID 顯著減少 Redis Key 的儲存空間，對於百萬級併發快取更節省記憶體。
+            #   3. URL 友善：翻頁 API (GET) 的參數更精簡 (例如: ?search_ssid=A7B2X9)，降低傳輸字元數。
+            #   4. 狀態隔離：讓「對話 ID (s_id)」與「搜尋結果快取 (ssid)」生命週期分開處理，增加快取管理彈性。
+        
+            # --- 存入 Redis 並取得第一頁 (統一門面) ---
+            # 此方法內建了：生成 6 碼隨機 SSID -> 序列化並儲存至 Redis -> 切出第 1 頁結果
+            search_ssid, first_page_results, pagination_meta = await session_cache.create_session_and_get_first_page(
+                all_ranked_results,
+                page_size=Config.PAGE_SIZE
             )
 
-            # 取得搜尋狀態與診斷建議（以第一頁資料為準）
-            search_status = check_search_status(first_page_results, plan, total_count=total_count)
-
-            # 對搜尋結果做一個搜尋結果品質的判斷
-            quality_label, is_fallback, ai_hint = evaluate_search_quality(
-                first_page_results,
-                vector_search_info,
-                rdb_info=rdb_info,
-                plan=plan
-            )
 
             t_end = time.perf_counter()
             total_duration_route = t_end - t0
@@ -201,7 +215,8 @@ async def generate_query_and_search(
 
             # 回傳精簡後的 Response 物件
             response = {
-                "s_id": search_ssid,       # 用戶的 s_id，同時作為後續翻頁的 search_ssid
+                "s_id": plan.get("s_id"),  # 原本的 s_id 照常回傳給 AI 識別
+                "search_ssid": search_ssid, # 新的 6 碼短 ID 給前端翻頁用
                 "status": quality_label,   # 狀態: success / partial_success / no_data
                 "data": {
                         # 保底旗標
@@ -245,7 +260,7 @@ async def generate_query_and_search(
             return response
 
         except Exception as e:
-            logging.error(f"Search API Error: {e}", exc_info=True)
+            logger.error(f"Search API Error: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -287,7 +302,7 @@ async def get_search_page(
             page_size=Config.PAGE_SIZE
         )
 
-        logging.info(
+        logger.info(
             f"[Page API] search_ssid={search_ssid}, page={page}, "
             f"回傳 {len(page_results)} 筆"
         )
@@ -312,5 +327,5 @@ async def get_search_page(
         raise
 
     except Exception as e:
-        logging.error(f"[Page API] 翻頁失敗: {e}", exc_info=True)
+        logger.error(f"[Page API] 翻頁失敗: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))

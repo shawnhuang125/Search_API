@@ -1,50 +1,32 @@
 # app/repository/vector_repository.py
-from typing import List, Dict, Any, Optional
+from typing import List, Any
 from app.models.search_dto import VectorSearchResult
-from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qmodels
 from app.config import Config
-import logging
+from app.utils.db import get_qdrant_client
+from app.utils.app_logger import logger
 import asyncio
 
-try:
-    from qdrant_client import QdrantClient
-    from sentence_transformers import SentenceTransformer
-    HAS_VECTOR_LIB = True
-except ImportError:
-    logging.warning("尚未安裝 qdrant-client 或 sentence-transformers，將強制使用 Mock 模式")
-    HAS_VECTOR_LIB = False
 
 class VectorRepository:
-    def __init__(self, host: str = None, port: int = None, use_mock: bool = False):
+    def __init__(self, use_mock: bool = False):
         self.gpu_limit = asyncio.Semaphore(10)
-        self.use_mock = use_mock or (not HAS_VECTOR_LIB)
+        self.use_mock = use_mock
         self.collection_name = Config.COLLECTION_NAME
-        self.payload_ready = True
-        self.client: Any = None
-        # self.model: Any = None
-        
-        # 優先讀取 Config 裡的 192.168.1.112
-        target_host = host or Config.VECTOR_DB_HOST
-        target_port = port or Config.VECTOR_DB_PORT
+        # 內部快取變數
+        self._cached_client = None 
 
-        if not self.use_mock:
-            logging.info(f"[Repo] 初始化 Qdrant 連線至 {target_host}:{target_port}")
-            try:
-                # 僅初始化 Qdrant 客戶端
-                self.client = AsyncQdrantClient(
-                    host=target_host, 
-                    port=int(target_port), 
-                    prefer_grpc=False 
-                )
-                # ❌ 刪除原本在這裡的 model_path = ... 和 self.model = SentenceTransformer(...)
-                
-            except Exception as e:
-                logging.error(f"Qdrant 連線載入失敗: {e}")
-                self.use_mock = True
+    async def _ensure_client(self):
+        """確保 client 已從 db.py 載入並返回"""
+        if self._cached_client is None:
+            self._cached_client = await get_qdrant_client()
+        return self._cached_client
+
 
     # 向量搜尋功能(只針對rdbms過濾出來的店家ID列表去做向量運算)
     async def search_in_ids_pure_similarity(self, query_str: str, rdbms_ids: List[Any],must_have_tags: List[str] = None,base_amenities: List[str] = None ) -> List[VectorSearchResult]:
+        
+        self.client = await self._ensure_client()
         # 前置處理
         try:
             # 因為 Qdrant 存的店家id是字串，必須把 SQL 拿到的店家id資料型態轉成字串
@@ -73,7 +55,7 @@ class VectorRepository:
         
 
         try:
-            logging.info(f"執行語意排序，範圍筆數: {len(clean_ids)}")
+            logger.info(f"執行語意排序，範圍筆數: {len(clean_ids)}")
             response = await self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector, # 使用傳入的向量
@@ -108,6 +90,9 @@ class VectorRepository:
         rdbms_ids: List[Any], 
         facility_tags: List[str] = None  # 變數名稱依要求使用 facility_tags
     ) -> List[VectorSearchResult]:
+        
+        self.client = await self._ensure_client()
+
         try:
             clean_ids = [int(i) for i in rdbms_ids if i is not None]
         except (ValueError, TypeError):
@@ -131,7 +116,7 @@ class VectorRepository:
 
         # 4. 執行搜尋
         try:
-            logging.info(f"執行混合過濾搜尋，範圍筆數: {len(clean_ids)}, 硬性標籤: {facility_tags}")
+            logger.info(f"執行混合過濾搜尋，範圍筆數: {len(clean_ids)}, 硬性標籤: {facility_tags}")
             response = await self.client.query_points(
                 collection_name=self.collection_name,
                 query=query_vector,
@@ -158,6 +143,9 @@ class VectorRepository:
 
 
     async def get_dtos_by_ids(self, rdbms_ids: List[Any]) -> List[VectorSearchResult]:
+
+        self.client = await self._ensure_client()
+        
         clean_ids = [int(i) for i in rdbms_ids if i is not None]
         
         # 使用 scroll 進行精確抓取

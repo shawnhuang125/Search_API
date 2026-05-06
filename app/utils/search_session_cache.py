@@ -10,6 +10,15 @@ import redis.asyncio as aioredis
 from app.config import Config
 
 
+import secrets
+import string
+
+def generate_short_ssid(length=6):
+    # 生成包含大寫字母與數字的隨機碼 (例如: A7B2X9)
+    alphabet = string.ascii_uppercase + string.digits
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+
 # 2. 定義自定義 Encoder 處理 Decimal
 class DecimalEncoder(json.JSONEncoder):
     """
@@ -43,8 +52,54 @@ class SearchSessionCache:
 
     def _build_key(self, search_ssid: str) -> str:
         return f"{self.KEY_PREFIX}:{search_ssid}"
+    
+    def _generate_short_ssid(self, length=6):
+        # 生成包含大寫字母與數字的隨機碼 (例如: A7B2X9)
+        alphabet = string.ascii_uppercase + string.digits
+        return ''.join(secrets.choice(alphabet) for _ in range(length))
 
     # ── 公開 API ──────────────────────────────────────────────────
+
+    
+    async def create_session_and_get_first_page(
+        self, 
+        all_results: List[Dict[str, Any]], 
+        page_size: int = None
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
+        """
+        [統一封裝門面] 
+        1. 生成 6 碼隨機 SSID
+        2. 將全量資料存入 Redis (處理過 Decimal)
+        3. 立即切出第 1 頁並回傳
+        
+        回傳: (search_ssid, first_page_results, pagination_meta)
+        """
+        # 1. 生成 SSID
+        search_ssid = self._generate_short_ssid(6)
+        
+        # 2. 存入 Redis (利用類別內已有的 save 邏輯)
+        await self.save(search_ssid, all_results)
+        
+        # 3. 取得第 1 頁 (利用類別內已有的 get_page 邏輯)
+        page_results, pagination_meta = await self.get_page(
+            search_ssid, page=1, page_size=page_size
+        )
+        
+        return search_ssid, page_results, pagination_meta
+
+    # ── 以下原始方法保持不變，但可被內部調用 ──────────────────────────────
+
+    async def save(self, search_ssid: str, all_results: List[Dict[str, Any]], ttl: int = None) -> None:
+        effective_ttl = ttl if ttl is not None else Config.SEARCH_SESSION_TTL
+        key = self._build_key(search_ssid)
+        try:
+            serialized = json.dumps(all_results, ensure_ascii=False, cls=DecimalEncoder)
+            await self._redis.set(key, serialized, ex=effective_ttl)
+            logging.info(f"[SessionCache] 已儲存 Session '{search_ssid}'，共 {len(all_results)} 筆")
+        except Exception as e:
+            logging.error(f"[SessionCache] 儲存失敗: {e}")
+            raise
+        
 
     async def save(
         self,

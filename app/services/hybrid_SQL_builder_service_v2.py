@@ -3,7 +3,7 @@ import json
 import time
 from app.utils.distance_utils import get_haversine_distance_sql # 匯入距離計算的SQL生成器
 from app.utils.performance_tracker import log_function_timing    # 函式層級耗時記錄器
-import logging
+from app.utils.app_logger import logger
 import copy
 
 class HybridSQLBuilder:
@@ -79,14 +79,14 @@ class HybridSQLBuilder:
         # 記錄函式起始時間，用於計算整體意圖解析耗時
         # 為什麼放在 s_id 取得之後：s_id 是 logging 必要參數，取得後才有辦法完整記錄這筆計時
         t0_analyze = time.perf_counter()
-        logging.info("[SQL Builder] 開始解析使用者意圖 (analyze_intent)")
+        logger.info("[SQL Builder] 開始解析使用者意圖 (analyze_intent)")
 
         s_id = json_input.get("s_id")
         if not s_id:
-            logging.error("[SQL Builder] 請求缺少 s_id，拒絕解析意圖")
+            logger.error("[SQL Builder] 請求缺少 s_id，拒絕解析意圖")
             raise ValueError("Missing s_id: 多用戶環境下必須提供 Session ID")
         
-        logging.info(f"[SQL Builder][SID: {s_id}] 開始解析使用者意圖")
+        logger.info(f"[SQL Builder][SID: {s_id}] 開始解析使用者意圖")
         # 查詢用的json資料方便做處理
         plan = {
             "s_id": s_id,       # 用戶連線id
@@ -118,13 +118,13 @@ class HybridSQLBuilder:
             plan["location_source"] = "user"
             plan["distance_needed"] = True
             plan["user_location"] = user_loc
-            logging.info(f"[SQL Builder][SID: {s_id}] 使用使用者提供座標: {user_loc}")
+            logger.info(f"[SQL Builder][SID: {s_id}] 使用使用者提供座標: {user_loc}")
         elif wants_distance:
             # 狀況 B: 沒提供座標但功能需要距離，注入預設座標
             plan["location_source"] = "default"
             plan["distance_needed"] = True
             plan["user_location"] = {"lat": 22.9972300, "lng": 120.2522700}
-            logging.warning(f"[SQL Builder][SID: {s_id}] 功能需要距離但未偵測到座標，注入崑山科大預設座標")
+            logger.warning(f"[SQL Builder][SID: {s_id}] 功能需要距離但未偵測到座標，注入崑山科大預設座標")
         else:
             # 狀況 C: 沒座標也沒距離需求
             plan["location_source"] = "none"
@@ -132,11 +132,11 @@ class HybridSQLBuilder:
 
         # 取得意圖
         intent = json_input.get("main_intent", "query")
-        logging.info(f"[SQL Builder][SID: {s_id}] 主意圖模式: {intent}")
+        logger.info(f"[SQL Builder][SID: {s_id}] 主意圖模式: {intent}")
 
         # 如果意圖的值為"recommend""
         if intent == "recommend":
-            logging.info(f"[SQL Builder][SID: {s_id}] 進入推薦模式: 全選欄位並強制開啟照片")
+            logger.info(f"[SQL Builder][SID: {s_id}] 進入推薦模式: 全選欄位並強制開啟照片")
             # 推main_intent如果等於("recommand")無視info_needed,直接選擇所有欄位
             for key, db_col in self.field_mapping.items():
                 plan["select_fields"].append(f"{db_col} AS {key}")
@@ -187,7 +187,7 @@ class HybridSQLBuilder:
             if field == "distance":
                 if plan["distance_needed"]:
                     plan["sort_clauses"].append(f"distance {method}") # 不要加p.
-                    logging.debug(f"[SQL Builder] 加入距離排序: {method}")
+                    logger.debug(f"[SQL Builder] 加入距離排序: {method}")
             else:
                 # 一般欄位
                 plan["sort_clauses"].append(f"p.{field} {method}")
@@ -214,7 +214,7 @@ class HybridSQLBuilder:
         if plan["vector_needed"]:
             plan["deferred_sorting"] = True
             plan["order_by_distance"] = any(s.get("field") == "distance" for s in json_input.get("sort_conditions", []))
-            logging.info(f"[SQL Builder][SID: {s_id}] 檢測到向量需求，排序將延遲至 VectorService")
+            logger.info(f"[SQL Builder][SID: {s_id}] 檢測到向量需求，排序將延遲至 VectorService")
         else:
             plan["deferred_sorting"] = False
             plan["order_by_distance"] = False
@@ -256,7 +256,7 @@ class HybridSQLBuilder:
                 
                 plan["vector_keywords"][key].append(processed_val)
                 plan["vector_needed"] = True
-                logging.info(f"[SQL Builder][SID: {s_id}] 捕捉語意特徵: {key} -> {processed_val}")
+                logger.info(f"[SQL Builder][SID: {s_id}] 捕捉語意特徵: {key} -> {processed_val}")
 
 
 
@@ -271,13 +271,13 @@ class HybridSQLBuilder:
         # 記錄 SQL 建構起始時間，涵蓋 _strip_strict_conditions 與 _recursive_parse 的整體耗時
         # 為什麼不對遞迴子函式個別計時：子函式會被呼叫多次，個別計時會產生大量噪音列，不利分析
         t0_build_sql = time.perf_counter()
-        logging.info(f"[SQL Builder][SID: {s_id}] 開始建構主查詢 SQL")
+        logger.info(f"[SQL Builder][SID: {s_id}] 開始建構主查詢 SQL")
 
         logic_tree = copy.deepcopy(plan.get("raw_logic_tree", {}))
 
         # 如果進入降階模式，執行「條件脫殼」
         if is_fallback:
-            logging.info(f"[SQL Builder][SID: {s_id}] 偵測到 Fallback 模式，開始放寬 SQL 過濾條件")
+            logger.info(f"[SQL Builder][SID: {s_id}] 偵測到 Fallback 模式，開始放寬 SQL 過濾條件")
             logic_tree = self._strip_strict_conditions(logic_tree)
 
         # 1. 初始化分頁變數
@@ -331,12 +331,12 @@ class HybridSQLBuilder:
             if plan.get("sort_clauses"):
                 sql += " ORDER BY " + ", ".join(plan["sort_clauses"])
             sql += f" LIMIT {page_size} OFFSET {offset}"
-            logging.info(f"[SQL Builder] 正常分頁模式: LIMIT {page_size}")
+            logger.info(f"[SQL Builder] 正常分頁模式: LIMIT {page_size}")
         else:
             # B. 向量模式：取消 SQL 排序，直接抓出 100 筆候選店家供向量重排
             sql += " ORDER BY p.rating DESC, p.user_ratings_total DESC "
             sql += "LIMIT 150"
-            logging.info(f"[SQL Builder] 語意重排模式: 擴大取樣 150 筆優質候選店家")
+            logger.info(f"[SQL Builder] 語意重排模式: 擴大取樣 150 筆優質候選店家")
 
         # 記錄 build_sql 函式總耗時至 CSV
         log_function_timing("build_sql", s_id, time.perf_counter() - t0_build_sql)
@@ -365,7 +365,7 @@ class HybridSQLBuilder:
                 
                 # 如果是 SQL 實體欄位且需要放寬
                 if child_key and child_key in sql_strict_keys:
-                    logging.info(f"[SQL Builder] Fallback：放寬 SQL 實體過濾條件 '{child_key}'")
+                    logger.info(f"[SQL Builder] Fallback：放寬 SQL 實體過濾條件 '{child_key}'")
                     continue
                 
                 # 遞迴處理
@@ -384,7 +384,7 @@ class HybridSQLBuilder:
     # 將巢狀JSON邏輯樹轉平為SQL WHERE字串
     def _recursive_parse(self, node, s_id):
         if not node: 
-            logging.debug("[SQL Builder Debug] 節點為空，跳過解析")
+            logger.debug("[SQL Builder Debug] 節點為空，跳過解析")
             return None
         
         key = list(node.keys())[0]
@@ -393,14 +393,14 @@ class HybridSQLBuilder:
             "內用", "冷氣", "外帶", "吃到飽", "特約停車場", "行動支付", "現金支付", "信用卡"
         }
         if key in vector_only_fields:
-            logging.info(f"[SQL Builder][SID: {s_id}] 攔截向量欄位 '{key}'，不生成 SQL")
+            logger.info(f"[SQL Builder][SID: {s_id}] 攔截向量欄位 '{key}'，不生成 SQL")
             return None
 
         # 處理邏輯運算子節點 (AND/OR)
         # 此區塊負責處理帶有子條件列表 (conditions) 的複合邏輯節點
         if "op" in node and "conditions" in node:
             operator = node["op"].upper() # 取得運算子 (如 'and', 'or') 並轉大寫以符合 SQL 標準
-            logging.debug(f"[SQL Builder Debug] 解析群組節點: {operator}, 子條件數: {len(node['conditions'])}")
+            logger.debug(f"[SQL Builder Debug] 解析群組節點: {operator}, 子條件數: {len(node['conditions'])}")
             child_sqls = []
             # 遍歷所有子條件，進行遞迴解析
             for i, child in enumerate(node["conditions"]):
@@ -410,10 +410,10 @@ class HybridSQLBuilder:
                 if child_sql:
                     child_sqls.append(child_sql)
                 else:
-                    logging.debug(f"[SQL Builder Debug] 群組 {operator} 的第 {i} 個子條件解析結果為空")
+                    logger.debug(f"[SQL Builder Debug] 群組 {operator} 的第 {i} 個子條件解析結果為空")
             # 安全檢查：如果該群組內所有子條件解析後都沒有結果，則回傳 None 讓上層跳過此群組
             if not child_sqls: 
-                logging.debug(f"[SQL Builder Debug] 群組 {operator} 無任何有效子條件")
+                logger.debug(f"[SQL Builder Debug] 群組 {operator} 無任何有效子條件")
                 return None
             # 如果群組內只有一個有效條件，就不需要額外包覆括號與運算子
             if len(child_sqls) == 1: 
@@ -422,7 +422,7 @@ class HybridSQLBuilder:
             # 例如: (p.rating > 4.5 OR p.address LIKE '%永康%')
             separator = f" {operator} "  
             combined_sql = f"({separator.join(child_sqls)})"
-            logging.debug(f"[SQL Builder Debug] 組合群組 SQL: {combined_sql}")
+            logger.debug(f"[SQL Builder Debug] 組合群組 SQL: {combined_sql}")
             return combined_sql
 
         # 2. 處理單一條件 (葉節點)
@@ -432,7 +432,7 @@ class HybridSQLBuilder:
         val = node_data.get("value")
         cmp = node_data.get("cmp", "=").upper()
 
-        logging.info(f"[SQL Builder][SID: {s_id}] ===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp}")
+        logger.info(f"[SQL Builder][SID: {s_id}] ===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp}")
 
         # 只要 val 是只有一個元素的 list，不管 cmp 是什麼，先把它轉成純字串/數值
         # 這樣後續不論走 IN 還是 LIKE 邏輯，item 都會是乾淨的
@@ -440,17 +440,17 @@ class HybridSQLBuilder:
             val = val[0]
         
         # 核心追蹤
-        logging.info(f"===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp} | 原始值: {val}")
+        logger.info(f"===> [Recursive Parse] 處理欄位: '{key}' | 算符: {cmp} | 原始值: {val}")
 
         # 優先檢查向量欄位
         if key in self.vector_fields:
-            logging.debug(f"[SQL Builder][SID: {s_id}] '{key}' 為向量欄位，跳過 SQL 生成")
+            logger.debug(f"[SQL Builder][SID: {s_id}] '{key}' 為向量欄位，跳過 SQL 生成")
             return None
 
         # 處理 JSON 設施標籤
         if key in self.facility_keys:
             if val is not True:
-                logging.debug(f"[SQL Builder][SID: {s_id}] 生成設施標籤 SQL 片段: {key}")
+                logger.debug(f"[SQL Builder][SID: {s_id}] 生成設施標籤 SQL 片段: {key}")
                 return None
             # 從 sql_where_mapping 取得對應的新欄位名 (如 pa.has_air_conditioner)
             db_col = self.sql_where_mapping.get(key)
@@ -461,7 +461,7 @@ class HybridSQLBuilder:
             self.param_counter += 1
             # 生成精確比對 SQL: "pa.has_air_conditioner = 1"
             sql_fragment = f"{db_col} = %({p_name})s"
-            logging.debug(f"[SQL Builder] 生成精確設施 SQL: {sql_fragment}")
+            logger.debug(f"[SQL Builder] 生成精確設施 SQL: {sql_fragment}")
             return sql_fragment
         
         # --- 處理一般 SQL 欄位 ---
@@ -487,7 +487,7 @@ class HybridSQLBuilder:
                 # IN NATURAL LANGUAGE MODE 是最直覺的搜尋方式
                 sql_fragment = f"MATCH({db_col}) AGAINST(%({p_name})s IN NATURAL LANGUAGE MODE)"
                 
-                logging.info(f"[SQL Builder] 生成 Full-Text SQL: {sql_fragment} | 關鍵字: {safe_val}")
+                logger.info(f"[SQL Builder] 生成 Full-Text SQL: {sql_fragment} | 關鍵字: {safe_val}")
                 return sql_fragment
 
             # 強制模糊比對欄位
@@ -498,7 +498,7 @@ class HybridSQLBuilder:
                 self.query_params[p_name] = param_value
                 self.param_counter += 1
                 sql_fragment = f"{db_col} LIKE %({p_name})s"
-                logging.debug(f"[SQL Builder Debug] 生成強制模糊 SQL: {sql_fragment} | {p_name}: {param_value}")
+                logger.debug(f"[SQL Builder Debug] 生成強制模糊 SQL: {sql_fragment} | {p_name}: {param_value}")
                 return sql_fragment
 
             # 處理真正的集合查詢 (IN)
@@ -512,7 +512,7 @@ class HybridSQLBuilder:
                     self.param_counter += 1
                 param_placeholders = ", ".join(p_names)
                 sql_fragment = f"{db_col} {cmp} ({param_placeholders})"
-                logging.debug(f"[SQL Builder Debug] 生成集合 SQL: {sql_fragment}")
+                logger.debug(f"[SQL Builder Debug] 生成集合 SQL: {sql_fragment}")
                 return sql_fragment
             
             # 一般精確比對
@@ -521,11 +521,11 @@ class HybridSQLBuilder:
                 self.query_params[p_name] = safe_val
                 self.param_counter += 1
                 sql_fragment = f"{db_col} {cmp} %({p_name})s"
-                logging.debug(f"[SQL Builder Debug] 生成一般 SQL: {sql_fragment}")
+                logger.debug(f"[SQL Builder Debug] 生成一般 SQL: {sql_fragment}")
                 return sql_fragment
         
         # 欄位未定義
-        logging.warning(f"!!! [SQL Builder Warning] 欄位 '{key}' 找不到對應的 Mapping 配置，該條件被丟棄")
+        logger.warning(f"!!! [SQL Builder Warning] 欄位 '{key}' 找不到對應的 Mapping 配置，該條件被丟棄")
         return None
     
 
@@ -538,7 +538,7 @@ class HybridSQLBuilder:
         生成用於計算店家總筆數的 SQL
         """
         s_id = plan.get("s_id")
-        logging.info(f"[SQL Builder][SID: {s_id}] 開始建構總數統計 SQL (Count Query)")
+        logger.info(f"[SQL Builder][SID: {s_id}] 開始建構總數統計 SQL (Count Query)")
         # 確保 Count 查詢從 p0 開始，且不殘留舊參數 ---
 
         # 記錄 count SQL 建構起始時間，用於觀察 Count 查詢的 SQL 組裝是否有效率瓶頸

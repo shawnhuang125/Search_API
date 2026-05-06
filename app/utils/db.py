@@ -1,4 +1,5 @@
 # app/utils/db.py
+from qdrant_client import AsyncQdrantClient
 import aiomysql
 import asyncio
 import logging
@@ -6,6 +7,7 @@ from app.config import Config
 
 # 全域變數，用於儲存連線池實例與同步鎖
 _db_pool = None
+_qdrant_client = None
 _db_lock = asyncio.Lock()
 
 async def get_async_db_pool():
@@ -41,19 +43,42 @@ async def get_async_db_pool():
                 raise e
     return _db_pool
 
-async def close_db_pool():
-    """
-    在程式關閉時安全釋放連線池資源。
-    應在 FastAPI 的 shutdown event 中呼叫。
-    """
-    global _db_pool
+
+async def get_qdrant_client():
+    """獲取 Qdrant 非同步客戶端單例"""
+    global _qdrant_client
+    if _qdrant_client is not None:
+        return _qdrant_client
+    
+    async with _db_lock:
+        if _qdrant_client is None:
+            try:
+                logging.info(f"[Vector DB] 初始化 Qdrant 連線: {Config.VECTOR_DB_HOST}")
+                _qdrant_client = AsyncQdrantClient(
+                    host=Config.VECTOR_DB_HOST,
+                    port=int(Config.VECTOR_DB_PORT),
+                    prefer_grpc=False
+                )
+            except Exception as e:
+                logging.error(f"[Vector DB] Qdrant 初始化失敗: {e}")
+                raise e
+    return _qdrant_client
+
+
+async def close_all_connections():
+    """在 shutdown 時呼叫，一次關閉 MySQL 與 Qdrant"""
+    global _db_pool, _qdrant_client
+    
+    # 關閉 MySQL
     if _db_pool is not None:
-        try:
-            logging.info("[DB Utils] 正在關閉資料庫連線池...")
-            _db_pool.close()
-            await _db_pool.wait_closed()
-            _db_pool = None # 重置為 None，確保資源完全回收
-            logging.info("[DB Utils] 資料庫連線池已完全關閉")
-        except Exception as e:
-            logging.error(f"[DB Utils] 關閉連線池時發生錯誤: {e}")
-            raise e
+        _db_pool.close()
+        await _db_pool.wait_closed()
+        _db_pool = None
+        logging.info("[DB] MySQL 已關閉")
+
+    # 關閉 Qdrant
+    if _qdrant_client is not None:
+        # Qdrant Client 內部通常會自動處理關閉，但主動執行 closes() 是更好的做法
+        await _qdrant_client.close()
+        _qdrant_client = None
+        logging.info("[DB] Qdrant 已關閉")

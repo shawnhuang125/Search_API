@@ -1,9 +1,29 @@
 # app/utils/data_formatter.py
 import json
-
-from app.config import Config # 引入 Config 來讀取 base_url 
+from app.config import Config 
 from typing import Optional
-# 
+
+
+def format_facility_tags(results):
+    for row in results:
+        raw_tags = row.get("facility_tags")
+        
+        # 1. 如果已經是 List (這是你資料庫目前的真實狀況)
+        if isinstance(raw_tags, list):
+            # 直接保留，不需處理，或者做點過濾
+            row["facility_tags"] = raw_tags
+            
+        # 2. 如果是 Dict (相容舊邏輯或未來可能的變動)
+        elif isinstance(raw_tags, dict):
+            processed_list = [k for k, v in raw_tags.items() if v is True]
+            row["facility_tags"] = processed_list
+            
+        # 3. 其他情況 (包含 None)
+        else:
+            row["facility_tags"] = []
+            
+    return results
+
 def enrich_results_with_photos(results, plan):
     """
     參數:
@@ -77,7 +97,6 @@ def format_response_data(results, plan):
     
     # 格式化設施標籤 (只有 SQL 有選該欄位時才執行)
     if any("AS facility_tags" in f for f in needed_fields):
-        from app.utils.format_facility_tags import format_facility_tags
         results = format_facility_tags(results)
     
     # 處理距離顯示
@@ -86,7 +105,7 @@ def format_response_data(results, plan):
         
     # 補上照片 (依據 plan 決定)
     if photos_needed:
-        from app.utils.get_photo import enrich_results_with_photos
+        
         results = enrich_results_with_photos(results, plan)
         
     return results
@@ -112,79 +131,3 @@ def format_distance_display(results):
                 pass
     return results
 
-def check_search_status(db_results, plan, total_count=0):
-    """
-    檢查搜尋結果狀態，並整合分頁資訊與查無資料時的診斷建議。
-    """
-    has_results = len(db_results) > 0
-    is_incomplete = plan.get("vector_needed", False) 
-    
-    # --- [新增] 提取分頁參數 ---
-    current_page = plan.get("page", 1)
-    page_size = plan.get("page_size", 3)
-    
-    status_info = {
-        "location_info": None,    # 用戶經緯度的設定訊息
-        "total_count": total_count,     # 符合條件的總筆數
-        "current_page": current_page,   # 目前是第幾分頁
-        "page_size": page_size,         # 顯示幕前一頁共有幾筆店家數據
-        "no_results_found": not has_results,    # 沒有符合的店家資料就會設為true否則預設default
-        "is_incomplete_search": is_incomplete,  # 搜尋是否完整
-        "has_next": (current_page * page_size) < total_count,   # 目前累積顯示的筆數是否小於總筆數
-        "suggestion": "",       #如果沒有任何符合篩選條件的店家資料的情況下會顯示哪邊出問題
-        "debug_details": None  
-    }
-
-    if plan.get("distance_needed"):
-        loc = plan.get("user_location")
-        source = plan.get("location_source")
-        
-        if source == "default":
-            status_info["location_info"] = {
-                "type": "default_fallback",
-                "message": f"未偵測到您的位置，目前以系統預設點 (崑山科大: {loc['lat']}, {loc['lng']}) 計算距離。",
-                "coordinates": loc
-            }
-        elif source == "user":
-            status_info["location_info"] = {
-                "type": "user_provided",
-                "message": "已根據您提供的位置計算距離。",
-                "coordinates": loc
-            }
-    
-    if not has_results:
-        active_params = plan.get("query_params", {})
-        
-        status_info["debug_details"] = {
-            "applied_filters": active_params,
-            "sql_where_clause": plan.get("generated_where_clause"),
-            "vector_search_status": "Not Supported" if is_incomplete else "Not Triggered"
-        }
-
-        # 建議邏輯維持原樣，但因應結構化欄位微調
-        if is_incomplete:
-            status_info["suggestion"] = "找不到符合精確條件的店家。建議放寬標籤或名稱限制。"
-        elif active_params:
-            # 修改：現在設施標籤是 TINYINT(1) 數值 1，不再是帶引號的字串
-            # 檢查是否有任何參數的值是 1，代表有開啟設施過濾
-            has_facility = any(v == 1 for v in active_params.values() if isinstance(v, int))
-            if has_facility:
-                status_info["suggestion"] = "目前設施條件（如：冷氣、內用）組合過於嚴格，建議減少勾選項目。"
-            else:
-                status_info["suggestion"] = "目前關鍵字搜尋不到店家，請更換關鍵字。"
-        else:
-            status_info["suggestion"] = "查無資料，建議調整搜尋範圍。"
-            
-    return status_info
-
-def generate_diagnostics(db_results: list, plan: dict, query_params: dict) -> Optional[dict]:
-    """當搜尋無結果時，產生診斷資訊供前端/AI 參考"""
-    if db_results:
-        return None
-        
-    return {
-        "active_filters": query_params,
-        "reason": "目前過濾條件組合過於嚴苛，導致資料庫無相符結果",
-        "debug_logic_tree": plan.get("raw_logic_tree"),
-        "sql_fragment": plan.get("generated_where_clause")
-    }

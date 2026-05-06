@@ -23,9 +23,11 @@ Search_api/
 │   │   ├── hybrid_sql_builder_service_v2.py  # SQL 生成器
 │   │   └── vector_service.py                 # 向量服務 Facade
 │   ├── repositories/         # 資料存取層
-│   │   ├── rdbms_repository.py   # MySQL/MariaDB 操作 (含 Mock)
-│   │   └── vector_repository.py  # Qdrant/Milvus 操作 (含 Mock)
+│   │   ├── rdbms_repository.py   # MySQL/MariaDB I/O操作
+│   │   └── vector_repository.py  # Qdrant/Milvus I/O操作 
 │   └── models/               # 資料模型 (DTO)
+|       └── search_dto.py     # 向量資料庫查詢資料物件定義
+|   
 ├── utils/
 │   └── db.py                 # 資料庫連線池管理
 ├── config.py                 # 環境變數配置
@@ -35,7 +37,8 @@ Search_api/
 ```
 ## Deploy Guide (部署指南)
 1. 環境需求 (Prerequisites)
-- Python 3.10+
+- 本專案使用 Python 3.10.11
+- 
 
 - MySQL / MariaDB (Optional, currently supports Mock)
 

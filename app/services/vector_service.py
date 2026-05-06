@@ -3,13 +3,15 @@ from typing import List, Dict, Any, Optional,Tuple
 from app.repository.vector_repository import VectorRepository
 from sentence_transformers import SentenceTransformer
 from app.models.search_dto import VectorSearchResult
+from huggingface_hub import snapshot_download
 import numpy as np
 import math
-import logging
+from app.utils.app_logger import logger
 import numpy as np
 import math
 import time
 import json
+import os
 
     # 本專案之向量搜尋的業務邏輯設計嚴格遵循"宣告式程式設計"
     # 為了提升維護效率與閱讀性所以將業務邏輯與資料庫搜尋之I/O運算分層設計
@@ -82,14 +84,34 @@ class RankSettings:
 
 class VectorService:
     def __init__(self):
-        # 1. 載入模型 (全應用程式唯一載入點)
-        logging.info("正在載入 BGE-M3 嵌入模型...")
-        self.model = SentenceTransformer('./m3_food_finetuned')
-        self.model.to('cuda') 
-        logging.info("模型載入完成")
+        self.model_name = "BAAI/bge-m3"
+        # 定義路徑 (確保在 /code/models/bge_m3)
+        base_dir = os.getcwd() 
+        self.model_path = os.path.abspath(os.path.join(base_dir, "models", "bge_m3"))
+        
+        # 如果目錄下沒有關鍵檔案 (例如 config.json)，就執行下載
+        # 注意：只判斷資料夾存在有時候不保險(可能下載到一半中斷)，判斷 config.json 更嚴謹
+        if not os.path.exists(os.path.join(self.model_path, "config.json")):
+            logger.info(f"模型檔案不完整，準備下載至 {self.model_path}...")
+            os.makedirs(self.model_path, exist_ok=True) 
+            
+            snapshot_download(
+                repo_id=self.model_name,
+                local_dir=self.model_path,
+                local_dir_use_symlinks=False  # 務必保持 False，否則 Docker 內路徑會出錯
+            )
+        
+        # 載入模型 (路徑完全一致)
+        logger.info(f"正在從 {self.model_path} 載入 BGE-M3 嵌入模型...")
+        self.model = SentenceTransformer(self.model_path) 
+        
 
-        # 2. 初始化 Repo (此時 Repo 的 __init__ 已經不會載入模型了)
+        self.model.to('cuda') 
+        logger.info("模型載入完成")
+
+        # 初始化 Repo
         self.repo = VectorRepository()
+
 
 
     # 檢查向量需求 - 向量搜尋 - 權重計算與排序
@@ -168,11 +190,11 @@ class VectorService:
             "query_content": query_str  
         }
             
-        logging.info(f"[Vector Service] 模糊語意查詢: '{query_str}'")
+        logger.info(f"[Vector Service] 模糊語意查詢: '{query_str}'")
 
-        logging.info(f"[Vector Service][SID: {s_id}] === 進入向量處理階段 ===")
-        logging.info(f"[Vector Service][SID: {s_id}] 接收關鍵字 (keywords): {keywords}")
-        logging.info(f"[Vector Service][SID: {s_id}] 候選店家筆數 (SQL Results): {len(db_results)}")
+        logger.info(f"[Vector Service][SID: {s_id}] === 進入向量處理階段 ===")
+        logger.info(f"[Vector Service][SID: {s_id}] 接收關鍵字 (keywords): {keywords}")
+        logger.info(f"[Vector Service][SID: {s_id}] 候選店家筆數 (SQL Results): {len(db_results)}")
 
         # 只要執行到這，代表一定有資料 (Case 1 or N)
         # 統一輸出抽樣日誌，幫助除錯 (包含店名、類別、標籤，建議加上距離)
@@ -183,17 +205,17 @@ class VectorService:
             "tags": r.get('facility_tags') 
         } for r in db_results[:3]]
         
-        logging.info(f"[Vector Service][SID: {s_id}] SQL 命中 {len(db_results)} 筆 (總數: {total_count})")
-        logging.info(f"[Vector Service][SID: {s_id}] 候選範例: {sample_data}")
-        logging.info(f"[Vector Service][SID: {s_id}] 最終送往向量庫的字串: '{query_str}'")
+        logger.info(f"[Vector Service][SID: {s_id}] SQL 命中 {len(db_results)} 筆 (總數: {total_count})")
+        logger.info(f"[Vector Service][SID: {s_id}] 候選範例: {sample_data}")
+        logger.info(f"[Vector Service][SID: {s_id}] 最終送往向量庫的字串: '{query_str}'")
 
         # 關聯式資料庫的店家搜尋結果列表,準備要丟入向量進行範圍搜尋
         rdbms_ids = [row.get("id") for row in db_results] 
 
         # 如果沒語意需求，也不需要硬性過濾標籤，就走純排序
         if not semantic_parts:
-            logging.info(f"[Vector Service][SID: {s_id}] 無明確語意需求，進入 [純指標排序模式]")
-            logging.info(f"[Vector Service][SID: {s_id}] 走純排序搜尋通道")
+            logger.info(f"[Vector Service][SID: {s_id}] 無明確語意需求，進入 [純指標排序模式]")
+            logger.info(f"[Vector Service][SID: {s_id}] 走純排序搜尋通道")
 
             # 純 ID 提取，此時取得的 vector_results 內部的 score 已經是 1.0
             vector_results = await self.repo.get_dtos_by_ids(rdbms_ids)
@@ -215,8 +237,8 @@ class VectorService:
             CURRENT_THRESHOLD = 0.0
         else:
             # 只有在「有需求」時才真正呼叫向量資料庫
-            logging.info(f"[Vector Service][SID: {s_id}] 語意查詢字串: '{query_str}'")
-            logging.info(f"[Vector Service][SID: {s_id}] 執行向量過濾搜尋 (SQL IDs 數量: {len(rdbms_ids)})")
+            logger.info(f"[Vector Service][SID: {s_id}] 語意查詢字串: '{query_str}'")
+            logger.info(f"[Vector Service][SID: {s_id}] 執行向量過濾搜尋 (SQL IDs 數量: {len(rdbms_ids)})")
             
             q_start = time.perf_counter()
 
@@ -246,13 +268,13 @@ class VectorService:
             
             best_score = vector_results[0].score if vector_results else 0.0
             
-            logging.info(f"[Vector Service][SID: {s_id}] 動態門檻已設定為: {CURRENT_THRESHOLD:.2f}")
+            logger.info(f"[Vector Service][SID: {s_id}] 動態門檻已設定為: {CURRENT_THRESHOLD:.2f}")
 
 
         # --- 3. 統一門檻檢查 ---
         if not vector_results or best_score < CURRENT_THRESHOLD:
             reason = "向量搜尋回傳 0 筆" if not vector_results else f"相似度太低 ({best_score:.4f})"
-            logging.warning(f"[Vector Service][SID: {s_id}] {reason}，已全數過濾（不執行降階）")
+            logger.warning(f"[Vector Service][SID: {s_id}] {reason}，已全數過濾（不執行降階）")
             
             info.update({
                 "status": "vector_no_match", 
@@ -263,7 +285,7 @@ class VectorService:
             return [], info
 
         # --- 4. 執行權重排序 (Hybrid Ranking) ---
-        logging.info(f"[Vector Service][SID: {s_id}] 進入混合排序階段，候選數: {len(vector_results)}")
+        logger.info(f"[Vector Service][SID: {s_id}] 進入混合排序階段，候選數: {len(vector_results)}")
         r_start = time.perf_counter()
         final_results = await self._apply_hybrid_ranking(
             vector_results, db_results, plan, CURRENT_THRESHOLD
@@ -321,53 +343,13 @@ class VectorService:
         # 設定一個較寬鬆的絕對下限 0.22，讓 BGE-M3 在處理模糊查詢時更有彈性
         final_threshold = max(0.22, BASE_THRESHOLD - complexity_bonus - tag_bonus)
         
-        logging.info(
+        logger.info(
             f"[Threshold Optimizer] 維度數: {active_dims}, "
             f"複雜度獎勵: {complexity_bonus:.2f}, 標籤細節補償: {tag_bonus:.2f}, "
             f"最終門檻: {final_threshold:.2f}"
         )
         
         return final_threshold
-
-
-    def _compute_distances_with_numpy(self, user_location: dict, db_map: dict, vector_results: list):
-        """
-        使用 NumPy 向量化運算極速計算候選店家的距離，並直接更新進 db_map 中。
-        """
-        try:
-            u_lat = np.radians(float(user_location["lat"]))
-            u_lng = np.radians(float(user_location["lng"]))
-
-            # 篩選出同時存在於向量結果與資料庫結果中的店家 ID
-            valid_v_ids = [str(v.id) for v in vector_results if str(v.id) in db_map]
-            
-            if not valid_v_ids:
-                return
-
-            # 建立 N x 2 的座標矩陣 [lat, lng]
-            coords = np.array([
-                [np.radians(float(db_map[v_id]['lat'])), 
-                np.radians(float(db_map[v_id]['lng']))] 
-                for v_id in valid_v_ids
-            ])
-
-            # Haversine 向量化公式
-            dlat = coords[:, 0] - u_lat
-            dlng = coords[:, 1] - u_lng
-            
-            a = np.sin(dlat/2)**2 + np.cos(u_lat) * np.cos(coords[:, 0]) * np.sin(dlng/2)**2
-            c = 2 * np.arcsin(np.sqrt(a))
-            distances_m = 6371000 * c 
-
-            # 將計算結果塞回 db_map
-            for i, v_id in enumerate(valid_v_ids):
-                db_map[v_id]['distance'] = float(distances_m[i])
-                
-            logging.info(f"[Vector Service] NumPy 已完成 {len(valid_v_ids)} 筆店家的距離計算")
-            
-        except Exception as e:
-            logging.error(f"[Vector Service] NumPy 距離計算發生錯誤: {e}")
-
 
     # 根據向量查詢結果進行權重運算與排序
     # 為什麼移除 top_k 截斷：現在由 Route 層搭配 Redis 分頁快取處理截斷，
@@ -419,7 +401,7 @@ class VectorService:
         else:
             weights = RankSettings.DEFAULT_WEIGHTS.copy()
 
-        logging.info(f"[Hybrid Rank][SID: {s_id}] 採用策略: {sort_strategy}, 最終權重分配: {weights}")
+        logger.info(f"[Hybrid Rank][SID: {s_id}] 採用策略: {sort_strategy}, 最終權重分配: {weights}")
 
 
         # 準備矩陣與數據
@@ -445,7 +427,7 @@ class VectorService:
                 valid_ids.append(v_id)
 
         if len(data_list) == 0:
-            logging.error(f"[Rank] SID:{s_id} 沒資料可以排!檢查一下 SQL 或向量庫。")
+            logger.error(f"[Rank] SID:{s_id} 沒資料可以排!檢查一下 SQL 或向量庫。")
             return []
 
         # 把dist_list轉成numpy矩陣,也為了數據的純淨性
@@ -485,14 +467,14 @@ class VectorService:
 
             sim_score = matrix[idx][0]
             if sim_score < semantic_threshold:
-                logging.debug(f"[Hybrid Rank] ID: {v_id} 語意分數 {sim_score:.4f} 不及格，直接淘汰。")
+                logger.debug(f"[Hybrid Rank] ID: {v_id} 語意分數 {sim_score:.4f} 不及格，直接淘汰。")
                 continue # 跳過這家店，不加入推薦名單！
             
             store_entry = db_map[v_id].copy()
 
             raw_tags = store_entry.get("facility_tags")
 
-            logging.info(f"[DEBUG] ID:{v_id} 原始 raw_tags 型態: {type(raw_tags)} 內容: {raw_tags}")
+            logger.info(f"[DEBUG] ID:{v_id} 原始 raw_tags 型態: {type(raw_tags)} 內容: {raw_tags}")
 
             if raw_tags:
                 if isinstance(raw_tags, str):
@@ -568,15 +550,12 @@ class VectorService:
             # 分頁需要完整的排序結果存入 Redis，由 Route 層的 SearchSessionCache 負責切頁。
             # 不再在此截斷，確保所有通過門檻的店家都被保留。
 
-        logging.info(f"[Hybrid Rank][SID: {s_id}] 排序完成，已生成可解釋性理由。")
+        logger.info(f"[Hybrid Rank][SID: {s_id}] 排序完成，已生成可解釋性理由。")
         return final_results
 
 
 if __name__ == "__main__":
     import asyncio
-    
-    # 簡單配置一下 Logging，不然看不到輸出
-    logging.basicConfig(level=logging.INFO, format='%(message)s')
 
     async def test_run():
         service = VectorService()
